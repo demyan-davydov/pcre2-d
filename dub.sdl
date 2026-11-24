@@ -1,0 +1,51 @@
+name "pcre2"
+description "D binding for PCRE2 (16-bit, UTF-16, @nogc; bundles PCRE2 10.49, built from source)"
+license "BSD-3-Clause"
+copyright "Copyright (c) the pcre2-d authors; PCRE2 is (c) University of Cambridge, Philip Hazel, Zoltan Herczeg"
+targetType "sourceLibrary"
+sourcePaths "source"
+importPaths "source"
+
+# Build options are read from the environment at build time: PCRE2_JIT=auto|on|off,
+# PCRE2_NEWLINE, PCRE2_MATCH_LIMIT, PCRE2_EXTRA_CFLAGS (see README, "Build options").
+
+# Default: build the vendored PCRE2 into build/lib/libpcre2d.a and link it statically.
+configuration "static" {
+    preGenerateCommands "$PCRE2_PACKAGE_DIR/scripts/build.sh static" platform="posix"
+    lflags "-L$PCRE2_PACKAGE_DIR/build/lib" platform="posix"
+    preGenerateCommands "powershell -NoProfile -ExecutionPolicy Bypass -File $PCRE2_PACKAGE_DIR/scripts/build.ps1 static" platform="windows"
+    lflags "/LIBPATH:$PCRE2_PACKAGE_DIR/build/lib" platform="windows"
+    libs "pcre2d"
+}
+
+# Same, but PCRE2 is built without the JIT compiler (interpreter only).
+configuration "static-nojit" {
+    preGenerateCommands "$PCRE2_PACKAGE_DIR/scripts/build.sh static nojit" platform="posix"
+    lflags "-L$PCRE2_PACKAGE_DIR/build/lib" platform="posix"
+    preGenerateCommands "powershell -NoProfile -ExecutionPolicy Bypass -File $PCRE2_PACKAGE_DIR/scripts/build.ps1 static nojit" platform="windows"
+    lflags "/LIBPATH:$PCRE2_PACKAGE_DIR/build/lib" platform="windows"
+    libs "pcre2d"
+}
+
+# Compiles the D binding into build/libpcre2.a (`dub build --config=library`), for checking / CI only.
+configuration "library" {
+    targetType "library"
+    targetPath "build"
+    preGenerateCommands "$PCRE2_PACKAGE_DIR/scripts/build.sh static" platform="posix"
+    lflags "-L$PCRE2_PACKAGE_DIR/build/lib" platform="posix"
+    preGenerateCommands "powershell -NoProfile -ExecutionPolicy Bypass -File $PCRE2_PACKAGE_DIR/scripts/build.ps1 static" platform="windows"
+    lflags "/LIBPATH:$PCRE2_PACKAGE_DIR/build/lib" platform="windows"
+    libs "pcre2d"
+}
+
+# `dub test`: same linkage as `static`, plus the test sources.
+configuration "unittest" {
+    preGenerateCommands "$PCRE2_PACKAGE_DIR/scripts/build.sh static" platform="posix"
+    lflags "-L$PCRE2_PACKAGE_DIR/build/lib" platform="posix"
+    preGenerateCommands "powershell -NoProfile -ExecutionPolicy Bypass -File $PCRE2_PACKAGE_DIR/scripts/build.ps1 static" platform="windows"
+    lflags "/LIBPATH:$PCRE2_PACKAGE_DIR/build/lib" platform="windows"
+    libs "pcre2d"
+    sourcePaths "source" "tests"
+    dflags "-preview=in" "-preview=dip1000" "-preview=dtorfields" platform="ldc"
+    importPaths "source" "tests"
+}

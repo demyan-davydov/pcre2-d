@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    compiler: ldc-latest }
+          - { os: ubuntu-24.04-arm, compiler: ldc-latest }
+          - { os: macos-latest,     compiler: ldc-latest }   # Apple Silicon (arm64)
+          - { os: macos-15-intel,   compiler: ldc-latest }   # x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ${{ matrix.compiler }}
+      - name: Unit tests (builds vendored PCRE2 with JIT)
+        run: dub test --compiler=ldc2
+      - name: Unit tests (interpreter only)
+        run: PCRE2_JIT=off dub test --compiler=ldc2 --force
+
+  windows:
+    name: windows-latest / ldc-latest (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-latest
+      - name: Unit tests
+        run: dub test --compiler=ldc2
