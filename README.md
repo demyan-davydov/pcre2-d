@@ -92,8 +92,9 @@ After changing options, a dependent may need `dub build --force` to relink.
 
 | Platform | Status |
 |---|---|
-| macOS arm64 (ldc 1.43, `dub test`, JIT on and `PCRE2_JIT=off`) | verified |
-| macOS x86_64, Linux x86_64/arm64, Windows x86_64 (MSVC) | scripts and CI ready, **not verified yet** |
+| macOS arm64 (ldc 1.43, `dub test`, JIT on and `PCRE2_JIT=off`, optimized) | verified (local and CI) |
+| macOS x86_64, Linux x86_64, Linux arm64 (ldc-latest, same three runs) | verified in CI |
+| Windows x86_64 (MSVC, ldc-latest, `dub test` with JIT) | verified in CI; interpreter-only run not done |
 
 macOS hardened runtime: JIT maps writable+executable memory. A notarized app with the hardened runtime needs the
 `com.apple.security.cs.allow-jit` entitlement, otherwise `jit_compile` fails and `Regex` silently uses the interpreter
