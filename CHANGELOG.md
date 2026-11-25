@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.2 (unreleased)
+## 0.1.2 (2026-11-25)
 
 - `matchLossy` / `matchesLossy`: a text without any surrogate unit is matched without the UTF check (through
   `pcre2_jit_match` for a JIT-compiled pattern). Results are the same; short valid texts match much faster.
