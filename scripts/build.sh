@@ -39,8 +39,7 @@ DEFS="-DHAVE_CONFIG_H -DPCRE2_CODE_UNIT_WIDTH=16 -DPCRE2_STATIC -DNEWLINE_DEFAUL
 ALL_CFLAGS="-std=gnu11 -O2 -fPIC -fvisibility=hidden -Wno-unused-parameter $DEFS ${PCRE2_EXTRA_CFLAGS:-} ${CFLAGS:-}"
 TARGET="$OUT/libpcre2d.a"
 
-SOURCES=$(ls "$SRC"/pcre2_*.c)
-HEADERS="$SRC/*.h $ROOT/config/config.h"
+# (quoted globs, not word-split lists: the package path may contain spaces)
 STAMP="$OBJ/flags.stamp"
 mkdir -p "$OUT" "$OBJ"
 
@@ -52,13 +51,17 @@ fi
 
 NEED_LINK=0
 [ -f "$TARGET" ] || NEED_LINK=1
-for s in $SOURCES; do
+for s in "$SRC"/pcre2_*.c; do
   o="$OBJ/$(basename "$s" .c).o"
   rebuild=0
   [ -f "$o" ] || rebuild=1
   if [ $rebuild = 0 ]; then
     [ "$s" -nt "$o" ] && rebuild=1
-    for h in $HEADERS; do [ "$h" -nt "$o" ] && rebuild=1; done
+    # headers, our config.h and the sljit sources that pcre2_jit_compile.c includes
+    for h in "$SRC"/*.h "$ROOT/config/config.h" "$ROOT"/vendor/pcre2/deps/sljit/sljit_src/*.[ch] \
+             "$ROOT"/vendor/pcre2/deps/sljit/sljit_src/allocator_src/*.c; do
+      [ "$h" -nt "$o" ] && rebuild=1
+    done
   fi
   if [ $rebuild = 1 ]; then
     echo "CC  $(basename "$s")"

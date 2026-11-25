@@ -41,7 +41,7 @@ if (-not (Test-Path $Stamp) -or (Get-Content $Stamp -Raw) -ne $NewStamp) {
     Set-Content $Stamp $NewStamp -NoNewline
 }
 
-$Headers = Get-ChildItem "$Src\*.h", "$Root\config\config.h"
+$Headers = @(Get-ChildItem "$Src\*.h", "$Root\config\config.h") + @(Get-ChildItem "$Root\vendor\pcre2\deps\sljit\sljit_src" -Recurse -Include *.c, *.h)
 $NeedLink = -not (Test-Path $Target)
 foreach ($s in $Sources) {
     $o = Join-Path $Obj ([IO.Path]::GetFileNameWithoutExtension($s) + ".obj")

@@ -3,8 +3,8 @@
 | Type | Owns | Copy | Destroy |
 |---|---|---|---|
 | `Regex` | compiled `pcre2_code` (+ JIT code) in a malloc'd block | atomic refcount++ | refcount--, free at 0 |
-| `MatchData` | `pcre2_match_data`, match context, JIT stack; one reference on its `Regex` | not copyable | frees scratch, refcount-- |
-| `Matches` (range) | nothing; points to a `MatchData` | plain copy | nothing |
+| `MatchData` | `pcre2_match_data`, match context, JIT stack, a malloc'd repair buffer for `matchLossy`/`matchesLossy`; one reference on its `Regex` | not copyable | frees scratch, refcount-- |
+| `Matches` (range) | nothing; points to a `MatchData` (and, from `matchesLossy`, into its repair buffer) | plain copy | nothing |
 
 - Nothing uses the GC: all of the API is `@nogc nothrow`. Compile errors and match failures are values
   (`CompileError`, `MatchStatus`); inputs are `const(wchar)[]` borrowed for the call; outputs are offsets
@@ -16,3 +16,9 @@
   (PCRE2 itself may malloc for large backtracking in the interpreter, bounded by `Limits.heap`).
 - `Matches` and the `MatchData` it points to must not outlive each other's use; the subject slice must stay alive
   and unchanged during iteration.
+- `Regex.id` is a process-unique number given at `compile`; copies share it.
+- The repair buffer of a `MatchData` is rewritten by every `matchLossy` / `matchesLossy` call on it. A range made by
+  `matchesLossy` notices this and ends with `MatchStatus.error` instead of reading the rewritten (or freed) buffer;
+  it is freed with the `MatchData`.
+- `Regex`'s postblit and destructor, and `MatchData`'s destructor, are `pure` by an explicit cast of the (impure) refcount
+  and free functions: sharing a compiled, immutable `Regex` is not observable through the type system.

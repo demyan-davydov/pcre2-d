@@ -32,7 +32,7 @@ for (auto m = md.matches("a=1 B=22"w); !m.empty; m.popFront())
     auto value = md.group(2);
 // md.match(text) is pcre2_match; matchLossy / matchesLossy read lone surrogates as U+FFFD (see below)
 }
-// MatchStatus: match, noMatch, matchLimit, depthLimit, heapLimit, jitStackLimit, badUtf, error
+// MatchStatus: match, noMatch, matchLimit, depthLimit, heapLimit, jitStackLimit, badUtf, error, badOffset
 ```
 
 - `Flags`: `caseless dotAll multiline dollarEndOnly utf noUtfCheck noJit ucp matchInvalidUtf`. `Limits{match, depth, heap}` bound the work;
@@ -58,7 +58,11 @@ for (auto m = md.matches("a=1 B=22"w); !m.empty; m.popFront())
 - `matchLossy` / `matchesLossy`: like `match` / `matches`, but a lone surrogate is read as U+FFFD, an ordinary character
   (`.` and `[^a]` take it). The text is copied only if it is not valid UTF-16, into a buffer kept in the `MatchData`
   (still `@nogc`); offsets are those of your text. Use `Flags.matchInvalidUtf` instead for PCRE2's own rule, where an
-  invalid unit matches nothing (but it rescans the subject at each match).
+  invalid unit matches nothing (but it rescans the subject at each match). The repair buffer is rewritten by every
+  Lossy call on the same `MatchData`; a `matchesLossy` range notices that and ends with `MatchStatus.error`. The Lossy
+  functions validate the text even for a regex compiled with `noUtfCheck`.
+- `badOffset`: `start` is past the end of the subject or inside a surrogate pair. An invalid `Regex` / `MatchData` gives
+  `error` / 0 values instead of crashing.
 - Ownership and threading: [OWNERSHIP.md](OWNERSHIP.md). `Regex` is shared and immutable; `MatchData` is per thread.
 
 ## Limits and runaway patterns

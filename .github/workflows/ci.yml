@@ -25,7 +25,7 @@ jobs:
       - name: Unit tests (builds vendored PCRE2 with JIT)
         run: dub test --compiler=ldc2
       - name: Unit tests (optimized)
-        run: dub test --compiler=ldc2 -b release-debug --force
+        run: dub test --compiler=ldc2 -b unittest-opt --force
       - name: Unit tests (interpreter only)
         run: PCRE2_JIT=off dub test --compiler=ldc2 --force
 

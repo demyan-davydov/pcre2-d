@@ -53,6 +53,7 @@ enum MatchStatus : ubyte
     jitStackLimit, /// the JIT stack ran out
     badUtf, /// subject is not valid UTF-16 (e.g. a lone surrogate); see `MatchData.getStartchar`
     error, /// anything else; see `MatchData.errorCode`
+    badOffset, /// `start` is past the end of the subject, or inside a surrogate pair (PCRE2_ERROR_BADOFFSET / BADUTFOFFSET)
 }
 
 /// Half-open range of UTF-16 code unit offsets. `participated == false`: the group did not take part
@@ -219,7 +220,7 @@ struct Regex
     /// True if matching runs JIT compiled code (false: interpreter).
     @property bool jitEnabled() const pure nothrow @nogc @safe { return p !is null && p.jit; }
     /// Number of capture groups, not counting the whole match (group 0).
-    @property uint captureCount() const pure nothrow @nogc @safe { return p.captureCount; }
+    @property uint captureCount() const pure nothrow @nogc @safe { return p ? p.captureCount : 0; }
 
     /// Number of the first group with this name, or -1. `name` is compared as UTF-16 code units.
     /// (`pcre2_substring_number_from_name`)
@@ -249,6 +250,9 @@ struct Regex
     /// the `Regex` lives), and its group number via `number`.
     const(wchar)[] namedGroup(uint i, out uint number) const nothrow @nogc @trusted
     {
+        number = 0;
+        if (p is null || i >= p.nameCount)
+            return null;
         const(wchar)* e = p.nameTable + cast(size_t) i * p.nameEntrySize;
         number = e[0];
         size_t n = 0;
@@ -273,6 +277,7 @@ struct MatchData
         size_t* ov;
         wchar* fixBuf; // repaired copy of a subject for the Lossy functions (malloc'd, reused)
         size_t fixCap;
+        size_t fixGen; // bumped every time the repair buffer is rewritten; ranges over it check it
     }
 
     @disable this(this);
@@ -333,7 +338,17 @@ struct MatchData
     /// Matches `subject` from code unit offset `start` (`pcre2_match`). Groups are then available.
     MatchStatus match(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
     {
+        if (pl is null)
+            return nullStatus();
         return run(subject, start, (pl.noUtfCheck && !(pl.options & PCRE2_MATCH_INVALID_UTF)) ? PCRE2_NO_UTF_CHECK : 0);
+    }
+
+    // an invalid (default or failed-to-create) MatchData: an error value instead of a null dereference
+    private MatchStatus nullStatus() nothrow @nogc @safe
+    {
+        rc = 0;
+        err = PCRE2_ERROR_NULL;
+        return MatchStatus.error;
     }
 
     /// Former name of `match`.
@@ -362,6 +377,8 @@ struct MatchData
         case PCRE2_ERROR_JIT_STACKLIMIT: return MatchStatus.jitStackLimit;
         case PCRE2_ERROR_UTF16_ERR1: case PCRE2_ERROR_UTF16_ERR2: case PCRE2_ERROR_UTF16_ERR3:
             return MatchStatus.badUtf;
+        case PCRE2_ERROR_BADOFFSET: case PCRE2_ERROR_BADUTFOFFSET:
+            return MatchStatus.badOffset;
         default: return MatchStatus.error;
         }
     }
@@ -370,13 +387,13 @@ struct MatchData
     @property int errorCode() const pure nothrow @nogc @safe { return err; }
 
     /// After `MatchStatus.badUtf`: code unit offset of the offending unit (`pcre2_get_startchar`).
-    @property size_t getStartchar() nothrow @nogc @trusted { return pcre2_get_startchar_16(md); }
+    @property size_t getStartchar() nothrow @nogc @trusted { return md ? pcre2_get_startchar_16(md) : 0; }
 
     /// Same as `getStartchar`, under a name that says what it is used for.
     alias badUtfOffset = getStartchar;
 
     /// Number of groups (including 0) the last match could report: `regex.captureCount + 1`.
-    @property uint groupCount() const pure nothrow @nogc @trusted { return pl.captureCount + 1; }
+    @property uint groupCount() const pure nothrow @nogc @trusted { return pl ? pl.captureCount + 1 : 0; }
 
     /// Group `i` of the last successful match. Out-of-range or non-participating: `participated == false`.
     Capture group(uint i) const pure nothrow @nogc @trusted
@@ -400,10 +417,14 @@ struct MatchData
     /// it, unlike with `Flags.matchInvalidUtf`, where an invalid unit matches nothing). The text is copied
     /// only if it is not valid UTF-16; the copy has the same length, so every offset is that of `subject`.
     /// Returns `MatchStatus.error` if the copy cannot be allocated. The copy lives in this `MatchData` until
-    /// the next Lossy call.
+    /// the next Lossy call. With `Flags.matchInvalidUtf` nothing is ever repaired (that flag already accepts
+    /// the subject).
     MatchStatus matchLossy(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
     {
-        auto st = match(subject, start);
+        if (pl is null)
+            return nullStatus();
+        // the subject is validated here even for a regex compiled with `noUtfCheck`: that is the point
+        auto st = run(subject, start, 0);
         if (st != MatchStatus.badUtf)
             return st;
         const fixed = repaired(subject);
@@ -416,10 +437,11 @@ struct MatchData
     }
 
     /// `matches` that reads lone surrogates as U+FFFD, like `matchLossy`. The subject given to the range is
-    /// the copy while one is needed, so keep this `MatchData` unused by other Lossy calls during iteration.
+    /// the copy while one is needed. Another Lossy call on this `MatchData` rewrites that copy, so it ends the
+    /// range at once: the range becomes empty with `status == MatchStatus.error` (never a stale read).
     Matches matchesLossy(const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
     {
-        auto r = matches(subject, start);
+        auto r = matchesChecked(subject, start);
         if (r.status != MatchStatus.badUtf)
             return r;
         const fixed = repaired(subject);
@@ -429,7 +451,18 @@ struct MatchData
             r.status = MatchStatus.error;
             return r;
         }
-        return matches(fixed, start);
+        auto fr = matches(fixed, start);
+        fr.gen = fixGen;
+        return fr;
+    }
+
+    // `matches` that validates the subject even when the regex has `noUtfCheck`
+    private Matches matchesChecked(const(wchar)[] subject, size_t start) return nothrow @nogc @trusted
+    {
+        auto r = Matches(&this, subject, start);
+        r.forceCheck = true;
+        r.advance();
+        return r;
     }
 
     // `subject` with each lone surrogate replaced by U+FFFD, in the buffer of this MatchData; null if out of memory
@@ -445,6 +478,7 @@ struct MatchData
             fixBuf = grown;
             fixCap = subject.length;
         }
+        ++fixGen;
         auto o = fixBuf[0 .. subject.length];
         foreach (i, unit; subject)
         {
@@ -472,7 +506,7 @@ struct MatchData
     Matches matches(const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
     {
         auto r = Matches(&this, subject, start);
-        r.advance(false);
+        r.advance();
         return r;
     }
 }
@@ -486,23 +520,40 @@ struct Matches
     private bool emptyPrev;
     private bool started;
     private bool done;
+    private bool forceCheck; // validate the first subject even if the regex has noUtfCheck
+    private size_t gen; // not 0: the subject is the repair buffer of the MatchData, valid while its fixGen is this
     /// `noMatch` after normal exhaustion; otherwise the status that stopped the iteration.
     MatchStatus status = MatchStatus.noMatch;
 
     private this(MatchData* m, const(wchar)[] subject, size_t pos) nothrow @nogc
     {
         this.m = m; this.subject = subject; this.pos = pos;
+        if (m.pl is null) // invalid MatchData: an empty range with an error status
+        {
+            done = true;
+            status = m.nullStatus();
+        }
     }
 
     @property bool empty() const pure nothrow @nogc @safe { return done; }
     @property Capture front() const pure nothrow @nogc @safe { return m.group(0); }
-    void popFront() nothrow @nogc @safe { advance(true); }
+    void popFront() nothrow @nogc @safe { advance(); }
 
-    private void advance(bool) nothrow @nogc @trusted
+    private void advance() nothrow @nogc @trusted
     {
+        if (done)
+            return;
+        if (gen && m.fixGen != gen) // the repair buffer was rewritten by another Lossy call
+        {
+            done = true;
+            status = MatchStatus.error;
+            return;
+        }
         // After the first successful call the subject is known valid: skip re-validation (avoids O(n^2)).
         const invalidOk = (m.pl.options & PCRE2_MATCH_INVALID_UTF) != 0;
-        uint extra = (started && !invalidOk) ? PCRE2_NO_UTF_CHECK : (m.pl.noUtfCheck && !invalidOk ? PCRE2_NO_UTF_CHECK : 0);
+        uint extra = 0;
+        if (!invalidOk && (started || (m.pl.noUtfCheck && !forceCheck)))
+            extra = PCRE2_NO_UTF_CHECK;
         if (emptyPrev)
             extra |= PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;
         auto st = m.run(subject, pos, extra);

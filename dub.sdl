@@ -49,3 +49,8 @@ configuration "unittest" {
     dflags "-preview=in" "-preview=dip1000" "-preview=dtorfields" platform="ldc"
     importPaths "source" "tests"
 }
+
+# `dub test -b unittest-opt`: optimized, but with asserts and unittests on (unlike `release`/`release-debug`).
+buildType "unittest-opt" {
+    buildOptions "unittests" "optimize" "debugInfo"
+}

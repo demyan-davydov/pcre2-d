@@ -3,7 +3,7 @@ module semantics;
 
 import pcre2;
 import core.stdc.stdio : printf;
-import pcre2.c_api : PCRE2_ERROR_MATCHLIMIT;
+import pcre2.c_api : PCRE2_ERROR_MATCHLIMIT, PCRE2_ERROR_NULL, PCRE2_ERROR_DEPTHLIMIT;
 
 private struct T
 {
@@ -204,14 +204,18 @@ unittest // limits: a catastrophic pattern ends with an error value
     }
 }
 
-unittest // depth limit (interpreter)
+unittest // depth limit (interpreter): nested lookaheads are nested matches
 {
-    wchar[200] s = 'a';
     CompileError e;
-    auto re = Regex.compile(`(?:a|b)*c`w, Flags.utf | Flags.noJit, e, Limits(10_000_000, 5, 20_000_000));
+    enum nested = `(?=(?=(?=(?=(?=(?=(?=(?=(?=(?=a))))))))))a`w;
+    auto re = Regex.compile(nested, Flags.utf | Flags.noJit, e, Limits(10_000_000, 3, 20_000_000));
+    assert(re.valid);
     auto md = scratch(re);
-    auto st = md.match(s[]);
-    assert(st == MatchStatus.depthLimit || st == MatchStatus.noMatch, "depth limit status");
+    assert(md.match("a"w) == MatchStatus.depthLimit);
+    assert(md.errorCode == PCRE2_ERROR_DEPTHLIMIT);
+    auto re2 = Regex.compile(nested, Flags.utf | Flags.noJit, e);
+    auto md2 = scratch(re2);
+    assert(md2.match("a"w) == MatchStatus.match);
 }
 
 unittest // JIT availability is reported and the interpreter is a working fallback
@@ -477,4 +481,74 @@ unittest // a Regex copied and destroyed from pure code by many threads keeps it
     bool ok;
     auto md = MatchData.createFromPattern(re, ok);
     assert(ok && md.match("caab"w) == MatchStatus.match && md.group(0) == Capture(1, 3, true));
+}
+
+unittest // an invalid Regex or MatchData gives values, not a null dereference
+{
+    Regex none;
+    assert(!none.valid && none.captureCount == 0 && none.namedGroupCount == 0 && none.id == 0);
+    uint number = 7;
+    assert(none.namedGroup(0, number) is null && number == 0);
+    assert(none.substringNumberFromName("x"w) == -1);
+
+    MatchData blank;
+    assert(!blank.valid && blank.groupCount == 0 && blank.getStartchar == 0);
+    assert(blank.match("a"w) == MatchStatus.error && blank.errorCode == PCRE2_ERROR_NULL);
+    assert(blank.matchLossy("a"w) == MatchStatus.error);
+    auto r = blank.matches("a"w);
+    assert(r.empty && r.status == MatchStatus.error);
+    auto r2 = blank.matchesLossy("a"w);
+    assert(r2.empty && r2.status == MatchStatus.error);
+    assert(!blank.group(0).participated);
+}
+
+unittest // a start offset past the end or inside a surrogate pair is badOffset
+{
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        auto re = mk(`x`w, Flags.utf | jitOff);
+        auto md = scratch(re);
+        assert(md.match("a😀x"w, 2) == MatchStatus.badOffset); // between the halves of the pair
+        assert(md.match("ab"w, 5) == MatchStatus.badOffset);
+        assert(md.match("a😀x"w, 3) == MatchStatus.match);
+    }
+}
+
+unittest // the Lossy functions validate even when the regex has noUtfCheck
+{
+    immutable wchar high = 0xD800;
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        auto re = mk(`^a.b$`w, Flags.utf | Flags.noUtfCheck | jitOff);
+        auto md = scratch(re);
+        assert(md.matchLossy("a"w ~ high ~ "b"w) == MatchStatus.match);
+        assert(md.group(0) == Capture(0, 3, true));
+        auto r = md.matchesLossy("a"w ~ high ~ "b"w);
+        assert(!r.empty && r.front == Capture(0, 3, true));
+    }
+}
+
+unittest // a Lossy range ends with an error if another Lossy call rewrote its buffer
+{
+    immutable wchar high = 0xD800;
+    auto re = mk(`a`w, Flags.utf);
+    auto md = scratch(re);
+    const text = "a"w ~ high ~ "a"w ~ high ~ "a"w;
+    auto r = md.matchesLossy(text);
+    assert(!r.empty);
+    size_t n;
+    for (; !r.empty; r.popFront())
+    {
+        ++n;
+        if (n == 1)
+            md.matchLossy("aaaaaaaaaaaaaaaaaaaaaaaa"w ~ high ~ "a"w); // longer: realloc, buffer rewritten
+    }
+    assert(n == 1 && r.status == MatchStatus.error);
+
+    // without interference the whole text is walked
+    n = 0;
+    auto r2 = md.matchesLossy(text);
+    for (; !r2.empty; r2.popFront())
+        ++n;
+    assert(n == 3 && r2.status == MatchStatus.noMatch);
 }
