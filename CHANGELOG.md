@@ -7,7 +7,8 @@
 - Names follow the C functions: `match` (was `search`), `getErrorMessage`, `getStartchar`, `substringNumberFromName`,
   `createFromPattern`, `config(ConfigWhat)`; the old names stay as aliases.
 - New `MatchData.matchLossy` and `matchesLossy`: lone surrogates are read as U+FFFD, offsets stay those of the subject.
-- New `MatchStatus.badOffset` (start past the end or inside a surrogate pair); invalid `Regex`/`MatchData` return error values
+- New `MatchStatus.badOffset` (start past the end or inside a surrogate pair; both used to come back as `error`, and with
+  `noUtfCheck` the pair case went unchecked); invalid `Regex`/`MatchData` return error values
   instead of dereferencing null; a `matchesLossy` range ends with `error` if its buffer was rewritten.
 - `build.sh` copes with spaces in the path and rebuilds when sljit sources change; the C types are no longer re-exported
   from `import pcre2;`.

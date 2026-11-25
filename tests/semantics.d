@@ -552,3 +552,16 @@ unittest // a Lossy range ends with an error if another Lossy call rewrote its b
         ++n;
     assert(n == 3 && r2.status == MatchStatus.noMatch);
 }
+
+unittest // noUtfCheck does not let a start offset inside a surrogate pair through, with or without JIT
+{
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        auto re = mk(`.`w, Flags.utf | Flags.noUtfCheck | jitOff);
+        auto md = scratch(re);
+        assert(md.match("a😀x"w, 2) == MatchStatus.badOffset);
+        assert(md.match("a😀x"w, 1) == MatchStatus.match && md.group(0) == Capture(1, 3, true));
+        assert(md.match("a😀x"w, 3) == MatchStatus.match && md.group(0) == Capture(3, 4, true));
+        assert(md.match("ab"w, 5) == MatchStatus.badOffset);
+    }
+}

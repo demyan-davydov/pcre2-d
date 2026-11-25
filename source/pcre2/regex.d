@@ -358,6 +358,17 @@ struct MatchData
     {
         static immutable wchar[1] nul = [0];
         auto s = subject.length ? subject.ptr : nul.ptr;
+        // A start past the end, and (with the UTF check skipped, when PCRE2 does not look at `start`) one inside a
+        // surrogate pair, are rejected here in O(1), as the checking path would.
+        if (start > subject.length
+            || ((opts & PCRE2_NO_UTF_CHECK) && (pl.options & PCRE2_UTF) && start > 0 && start < subject.length
+                && subject[start] >= 0xDC00 && subject[start] <= 0xDFFF
+                && subject[start - 1] >= 0xD800 && subject[start - 1] <= 0xDBFF))
+        {
+            rc = start > subject.length ? PCRE2_ERROR_BADOFFSET : PCRE2_ERROR_BADUTFOFFSET;
+            err = rc;
+            return MatchStatus.badOffset;
+        }
         // pcre2_jit_match does no UTF validation, so it is only used when the check is skipped;
         // otherwise pcre2_match (which still runs the JIT code, after validating the subject).
         // (with PCRE2_MATCH_INVALID_UTF the subject is scanned inside the match: always pcre2_match)
@@ -383,7 +394,7 @@ struct MatchData
         }
     }
 
-    /// PCRE2 error code of the last failed `search` (0 if none).
+    /// PCRE2 error code of the last matching call (`match`, `matchLossy`, a step of a range), 0 if it did not fail.
     @property int errorCode() const pure nothrow @nogc @safe { return err; }
 
     /// After `MatchStatus.badUtf`: code unit offset of the offending unit (`pcre2_get_startchar`).
