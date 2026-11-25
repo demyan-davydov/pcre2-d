@@ -731,3 +731,39 @@ unittest
             assert(md3.matchLossy(high ~ "b"w, 1) == MatchStatus.match);
         }
 }
+
+@("matchLossy: boundaries of the scanned region (start at the end, past the end, empty text, surrogate at index 0)")
+unittest
+{
+    immutable wchar high = 0xD800, low = 0xDC00;
+    foreach (flags; [Flags.utf, Flags.utf | Flags.noUtfCheck])
+        foreach (jitOff; [Flags.none, Flags.noJit])
+        {
+            auto re = mk(`(?<=.)$`w, flags | jitOff);
+            auto md = scratch(re);
+            // a lone surrogate right before the end is read by the look-behind: repaired, `.` takes it
+            foreach (lone; [high, low])
+            {
+                immutable wstring t = "a"w ~ lone;
+                assert(md.matchLossy(t, 2) == MatchStatus.match && md.group(0) == Capture(2, 2, true));
+                auto r = md.matchesLossy(t, 2);
+                assert(!r.empty && r.front == Capture(2, 2, true));
+                assert(md.matchLossy(t, 3) == MatchStatus.badOffset);
+                auto r2 = md.matchesLossy(t, 3);
+                assert(r2.empty && r2.status == MatchStatus.badOffset);
+            }
+            // a surrogate at index 0, the look-behind from index 1 reads it
+            auto lb = mk(`(?<=.)b`w, flags | jitOff);
+            auto md2 = scratch(lb);
+            assert(md2.matchLossy(low ~ "b"w, 1) == MatchStatus.match && md2.group(0) == Capture(1, 2, true));
+            // empty text, start 0 and past the end
+            auto any = mk(`x*`w, flags | jitOff);
+            auto md3 = scratch(any);
+            assert(md3.matchLossy(""w) == MatchStatus.match && md3.group(0) == Capture(0, 0, true));
+            assert(md3.matchLossy(""w, 1) == MatchStatus.badOffset);
+            auto r3 = md3.matchesLossy(""w);
+            assert(!r3.empty && r3.front == Capture(0, 0, true));
+            r3.popFront();
+            assert(r3.empty && r3.status == MatchStatus.noMatch);
+        }
+}

@@ -474,13 +474,15 @@ struct MatchData
     }
 
     // The part of `subject` a match from `start` can read: PCRE2 looks back at most `maxLookbehind` characters
-    // (two code units each at most) from `start`, and what is before that is never read nor validated.
+    // (two code units each at most) from `start`, and what is before that is never read nor validated. Two more
+    // units are scanned as a margin (a multiline `^` may look at the previous character, which the look-behind
+    // count of PCRE2 is not documented to include). This holds also for `start >= subject.length`, where a match
+    // at the end can still look back.
     private const(wchar)[] unreadPrefixSkipped(const(wchar)[] subject, size_t start) const pure nothrow @nogc @trusted
     {
-        if (start >= subject.length)
-            return subject[$ .. $];
-        const back = pl ? cast(size_t) pl.maxLookbehind * 2 : 0;
-        return subject[(start > back ? start - back : 0) .. $];
+        const end = start < subject.length ? start : subject.length;
+        const back = (pl ? cast(size_t) pl.maxLookbehind * 2 : 0) + 2;
+        return subject[(end > back ? end - back : 0) .. $];
     }
 
     // `matches` that validates the subject even when the regex has `noUtfCheck`
