@@ -103,7 +103,8 @@ private long[2] firstMatch(wstring pattern, wstring subject, Flags flags)
     return res;
 }
 
-unittest // the table of everyday expressions
+@("the table of everyday expressions")
+unittest
 {
     foreach (ref c; matchCases)
     {
@@ -118,14 +119,17 @@ unittest // the table of everyday expressions
     }
 }
 
-unittest // groups of everyday expressions
+@("groups of everyday expressions")
+unittest
 {
     foreach (jitOff; [Flags.none, Flags.noJit])
     {
         CompileError e;
         auto re = Regex.compile(`(\d+)-(\d+)`w, Flags.utf | jitOff, e);
+        assert(re.valid, "does not compile");
         bool ok;
         auto md = MatchData.createFromPattern(re, ok);
+        assert(ok);
         assert(md.match("a 10-20"w) == MatchStatus.match);
         assert(md.group(0) == Capture(2, 7, true));
         assert(md.group(1) == Capture(2, 4, true));
@@ -133,7 +137,9 @@ unittest // groups of everyday expressions
         assert(md.groupCount == 3);
 
         auto named = Regex.compile(`(?<k>\w+)=(?<v>\w*)`w, Flags.utf | jitOff, e);
+        assert(named.valid);
         auto md2 = MatchData.createFromPattern(named, ok);
+        assert(ok);
         assert(md2.match("x a=b"w) == MatchStatus.match);
         assert(md2.group(named, "k"w) == Capture(2, 3, true));
         assert(md2.group(named, "v"w) == Capture(4, 5, true));
@@ -141,20 +147,25 @@ unittest // groups of everyday expressions
         assert(md2.group(named, "v"w) == Capture(2, 2, true), "an empty group took part");
 
         auto alt = Regex.compile(`(a)|(b)`w, Flags.utf | jitOff, e);
+        assert(alt.valid);
         auto md3 = MatchData.createFromPattern(alt, ok);
+        assert(ok);
         assert(md3.match("b"w) == MatchStatus.match);
         assert(!md3.group(1).participated && md3.group(2) == Capture(0, 1, true));
     }
 }
 
-unittest // every match of an everyday expression, in order
+@("every match of an everyday expression, in order")
+unittest
 {
     foreach (jitOff; [Flags.none, Flags.noJit])
     {
         CompileError e;
         auto re = Regex.compile(`\b\w+\b`w, Flags.utf | jitOff, e);
+        assert(re.valid);
         bool ok;
         auto md = MatchData.createFromPattern(re, ok);
+        assert(ok);
         size_t[2][] all;
         for (auto r = md.matches("one, two;three"w); !r.empty; r.popFront())
             all ~= [r.front.begin, r.front.end];
@@ -162,13 +173,36 @@ unittest // every match of an everyday expression, in order
     }
 }
 
-unittest // patterns that must be rejected at compile time
+@("patterns that must be rejected at compile time, with the reason and the place (PCRE2 10.49 codes)")
+unittest
 {
-    foreach (bad; [`(`w, `)`w, `[a`w, `*a`w, `a{2,1}`w, `(?<n>a)(?<n>b)`w, `\`w, `(?z)`w, `(?<=a+)b`w, `\p{Nope}`w, `\k<nope>`w])
+    static struct Bad
+    {
+        wstring pattern;
+        int code;
+        size_t offset;
+    }
+
+    immutable Bad[] bads = [
+        Bad(`(`, 114, 1), // missing closing parenthesis
+        Bad(`)`, 122, 1), // unmatched closing parenthesis
+        Bad(`[a`, 106, 2), // missing terminating ]
+        Bad(`*a`, 109, 1), // quantifier does not follow a repeatable item
+        Bad(`a{2,1}`, 104, 5), // numbers out of order in {} quantifier
+        Bad(`(?<n>a)(?<n>b)`, 143, 12), // two named subpatterns have the same name
+        Bad(`\`, 101, 1), // \ at end of pattern
+        Bad(`(?z)`, 111, 3), // unrecognized character after (? or (?-
+        Bad(`(?<=a+)b`, 125, 0), // lookbehind assertion is not fixed length
+        Bad(`\p{Nope}`, 147, 8), // unknown property
+        Bad(`\k<nope>`, 115, 3), // reference to non-existent subpattern
+    ];
+    foreach (ref bad; bads)
     {
         CompileError e;
-        auto re = Regex.compile(bad, Flags.utf, e);
+        auto re = Regex.compile(bad.pattern, Flags.utf, e);
         assert(!re.valid, "should not compile");
-        assert(e.code != 0);
+        assert(e.code == bad.code && e.offset == bad.offset);
+        char[256] buf;
+        assert(getErrorMessage(e.code, buf[]).length > 0);
     }
 }

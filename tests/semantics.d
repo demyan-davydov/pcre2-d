@@ -46,7 +46,8 @@ private long[2] find(const(wchar)[] pat, const(wchar)[] subj, Flags f = Flags.ut
     return res;
 }
 
-unittest // ASCII-only \d \w \s \b (no UCP)
+@("ASCII-only \\d \\w \\s \\b (no UCP)")
+unittest
 {
     assert(find(`\d+`w, "x١٢٣ 42"w) == [5, 7]); // Arabic-Indic digits do not match
     assert(find(`\w+`w, "éé abc"w) == [3, 6]);
@@ -54,7 +55,8 @@ unittest // ASCII-only \d \w \s \b (no UCP)
     assert(find(`a\b`w, "aé"w) == [0, 1]); // \b between 'a' and non-ASCII é
 }
 
-unittest // caseless: Unicode simple case folding in UTF mode
+@("caseless: Unicode simple case folding in UTF mode")
+unittest
 {
     assert(find(`straße`w, "STRASSE"w, Flags.utf | Flags.caseless) == [-1, -1]); // simple folding only
     assert(find(`é`w, "É"w, Flags.utf | Flags.caseless) == [0, 1]);
@@ -63,7 +65,8 @@ unittest // caseless: Unicode simple case folding in UTF mode
     assert(find(`é`w, "É"w, Flags.utf) == [-1, -1]);
 }
 
-unittest // dot, dotAll
+@("dot, dotAll")
+unittest
 {
     assert(find(`a.b`w, "a\nb"w) == [-1, -1]);
     assert(find(`a.b`w, "a\rb"w) == [0, 3]); // only \n is a newline (build-time LF)
@@ -71,7 +74,8 @@ unittest // dot, dotAll
     assert(find(`^.$`w, "😀"w) == [0, 2]); // astral char: one `.`, two code units
 }
 
-unittest // $ and ^
+@("$ and ^")
+unittest
 {
     assert(find(`a$`w, "a\n"w, Flags.utf | Flags.dollarEndOnly) == [-1, -1]);
     assert(find(`a$`w, "a\n"w, Flags.utf) == [0, 1]); // without DOLLAR_ENDONLY, $ also before final \n
@@ -81,7 +85,8 @@ unittest // $ and ^
     assert(find(`^b`w, "a\nb"w) == [-1, -1]);
 }
 
-unittest // lookahead, lazy quantifiers
+@("lookahead, lazy quantifiers")
+unittest
 {
     assert(find(`foo(?=bar)`w, "foobaz foobar"w) == [7, 10]);
     assert(find(`foo(?!bar)`w, "foobar foobaz"w) == [7, 10]);
@@ -89,7 +94,8 @@ unittest // lookahead, lazy quantifiers
     assert(find(`<.+>`w, "<a><b>"w) == [0, 6]);
 }
 
-unittest // groups: participation vs empty, named groups
+@("groups: participation vs empty, named groups")
+unittest
 {
     foreach (jitOff; [Flags.none, Flags.noJit])
     {
@@ -112,7 +118,8 @@ unittest // groups: participation vs empty, named groups
     }
 }
 
-unittest // compile errors carry the pattern offset
+@("compile errors carry the pattern offset")
+unittest
 {
     CompileError e;
     auto re = Regex.compile(`ab(c`w, Flags.utf, e);
@@ -124,7 +131,8 @@ unittest // compile errors carry the pattern offset
     assert(!re2.valid && e.offset == 2);
 }
 
-unittest // UTF validity: a lone surrogate in the subject is an error, not a crash
+@("UTF validity: a lone surrogate in the subject is an error, not a crash")
+unittest
 {
     wchar[3] s = ['a', 0xD800, 'b']; // lone high surrogate
     wchar[3] t = ['a', 0xDC00, 'b']; // lone low surrogate
@@ -141,7 +149,8 @@ unittest // UTF validity: a lone surrogate in the subject is an error, not a cra
     }
 }
 
-unittest // positions are UTF-16 code units; start offset
+@("positions are UTF-16 code units; start offset")
+unittest
 {
     auto re = mk(`é+`w, Flags.utf);
     auto md = scratch(re);
@@ -151,7 +160,8 @@ unittest // positions are UTF-16 code units; start offset
     assert(md.group(0).begin == 2);
 }
 
-unittest // iteration over all matches, including empty matches
+@("iteration over all matches, including empty matches")
+unittest
 {
     foreach (jitOff; [Flags.none, Flags.noJit])
     {
@@ -176,7 +186,8 @@ unittest // iteration over all matches, including empty matches
     }
 }
 
-unittest // iteration reports a UTF error and stops
+@("iteration reports a UTF error and stops")
+unittest
 {
     wchar[3] s = ['a', 0xD800, 'a'];
     auto re = mk(`a`w, Flags.utf);
@@ -185,7 +196,8 @@ unittest // iteration reports a UTF error and stops
     assert(r.empty && r.status == MatchStatus.badUtf);
 }
 
-unittest // limits: a catastrophic pattern ends with an error value
+@("limits: a catastrophic pattern ends with an error value")
+unittest
 {
     wchar[40] subj = 'a';
     wchar[41] bad = 'a';
@@ -204,7 +216,8 @@ unittest // limits: a catastrophic pattern ends with an error value
     }
 }
 
-unittest // depth limit (interpreter): nested lookaheads are nested matches
+@("depth limit (interpreter): nested lookaheads are nested matches")
+unittest
 {
     CompileError e;
     enum nested = `(?=(?=(?=(?=(?=(?=(?=(?=(?=(?=a))))))))))a`w;
@@ -218,7 +231,8 @@ unittest // depth limit (interpreter): nested lookaheads are nested matches
     assert(md2.match("a"w) == MatchStatus.match);
 }
 
-unittest // JIT availability is reported and the interpreter is a working fallback
+@("JIT availability is reported and the interpreter is a working fallback")
+unittest
 {
     CompileError e;
     auto a = Regex.compile(`a+`w, Flags.utf, e);
@@ -230,7 +244,8 @@ unittest // JIT availability is reported and the interpreter is a working fallba
     version (unittest) printf("JIT in this build: %d\n", cast(int) a.jitEnabled);
 }
 
-unittest // the same Regex matched from several threads
+@("the same Regex matched from several threads")
+unittest
 {
     import core.thread : Thread;
     import core.atomic : atomicOp, atomicLoad;
@@ -265,7 +280,8 @@ unittest // the same Regex matched from several threads
     assert(atomicLoad(okCount) == N);
 }
 
-unittest // the whole API is @nogc nothrow and allocates nothing on the GC heap while matching
+@("the whole API is @nogc nothrow and allocates nothing on the GC heap while matching")
+unittest
 {
     import core.memory : GC;
 
@@ -292,7 +308,8 @@ unittest // the whole API is @nogc nothrow and allocates nothing on the GC heap 
     assert(GC.stats().usedSize == before);
 }
 
-unittest // Flags.ucp: Unicode \d \w \s \b
+@("Flags.ucp: Unicode \\d \\w \\s \\b")
+unittest
 {
     assert(find(`\w+`w, "éé abc"w, Flags.utf | Flags.ucp) == [0, 2]);
     assert(find(`\w+`w, "жук"w, Flags.utf | Flags.ucp) == [0, 3]);
@@ -301,7 +318,8 @@ unittest // Flags.ucp: Unicode \d \w \s \b
     assert(find(`ж`w, "Ж"w, Flags.utf | Flags.ucp | Flags.caseless) == [0, 1]);
 }
 
-unittest // Flags.matchInvalidUtf: a lone surrogate is not an error, offsets are the original ones
+@("Flags.matchInvalidUtf: a lone surrogate is not an error, offsets are the original ones")
+unittest
 {
     immutable wchar high = 0xD800, low = 0xDC00;
     immutable subj = "ok "w ~ high ~ " ok "w ~ low ~ " end"w;
@@ -326,14 +344,15 @@ unittest // Flags.matchInvalidUtf: a lone surrogate is not an error, offsets are
 
         auto dots = mk(`.`w, Flags.utf | Flags.matchInvalidUtf | jitOff);
         auto md2 = scratch(dots);
-        size_t n;
+        size_t[2][] dotPairs;
         for (auto q = md2.matches("a"w ~ high ~ "b"w); !q.empty; q.popFront())
-            ++n;
-        assert(n >= 2); // a and b at least; the offsets stay in the original text
+            dotPairs ~= [q.front.begin, q.front.end];
+        assert(dotPairs == [[0, 1], [2, 3]], "an invalid unit matches nothing; offsets are the original ones");
     }
 }
 
-unittest // Regex.id is unique per compile and shared by copies
+@("Regex.id is unique per compile and shared by copies")
+unittest
 {
     auto a = mk(`a`w, Flags.utf);
     auto b = mk(`a`w, Flags.utf);
@@ -342,7 +361,8 @@ unittest // Regex.id is unique per compile and shared by copies
     assert(Regex.init.id == 0);
 }
 
-unittest // Regex and MatchData can be held by value in pure code
+@("Regex and MatchData can be held by value in pure code")
+unittest
 {
     static struct Holder
     {
@@ -366,7 +386,8 @@ unittest // Regex and MatchData can be held by value in pure code
     useMatchData(MatchData.createFromPattern(h.re, ok));
 }
 
-unittest // the former names stay as aliases
+@("the former names stay as aliases")
+unittest
 {
     auto re = mk(`(?<k>a)`w, Flags.utf);
     auto md = scratch(re);
@@ -382,7 +403,8 @@ unittest // the former names stay as aliases
     assert(config(ConfigWhat.unicode) == 1);
 }
 
-unittest // matchLossy / matchesLossy: a lone surrogate reads as U+FFFD, offsets are the original ones
+@("matchLossy / matchesLossy: a lone surrogate reads as U+FFFD, offsets are the original ones")
+unittest
 {
     immutable wchar high = 0xD800, low = 0xDC00;
     immutable subj = "ok "w ~ high ~ " ok "w ~ low ~ " end"w;
@@ -422,7 +444,8 @@ unittest // matchLossy / matchesLossy: a lone surrogate reads as U+FFFD, offsets
     }
 }
 
-unittest // matchLossy with limits: the status is still reported
+@("matchLossy with limits: the status is still reported")
+unittest
 {
     import std.array : replicate;
     import std.conv : to;
@@ -438,7 +461,8 @@ unittest // matchLossy with limits: the status is still reported
     assert(r.empty && r.status == MatchStatus.matchLimit);
 }
 
-unittest // matchInvalidUtf together with noUtfCheck, exact offsets
+@("matchInvalidUtf together with noUtfCheck, exact offsets")
+unittest
 {
     immutable wchar high = 0xD800;
     foreach (jitOff; [Flags.none, Flags.noJit])
@@ -452,7 +476,8 @@ unittest // matchInvalidUtf together with noUtfCheck, exact offsets
     }
 }
 
-unittest // a Regex copied and destroyed from pure code by many threads keeps its refcount right
+@("a Regex copied and destroyed from pure code by many threads keeps its refcount right")
+unittest
 {
     import core.thread : Thread;
 
@@ -483,7 +508,8 @@ unittest // a Regex copied and destroyed from pure code by many threads keeps it
     assert(ok && md.match("caab"w) == MatchStatus.match && md.group(0) == Capture(1, 3, true));
 }
 
-unittest // an invalid Regex or MatchData gives values, not a null dereference
+@("an invalid Regex or MatchData gives values, not a null dereference")
+unittest
 {
     Regex none;
     assert(!none.valid && none.captureCount == 0 && none.namedGroupCount == 0 && none.id == 0);
@@ -502,7 +528,8 @@ unittest // an invalid Regex or MatchData gives values, not a null dereference
     assert(!blank.group(0).participated);
 }
 
-unittest // a start offset past the end or inside a surrogate pair is badOffset
+@("a start offset past the end or inside a surrogate pair is badOffset")
+unittest
 {
     foreach (jitOff; [Flags.none, Flags.noJit])
     {
@@ -514,7 +541,8 @@ unittest // a start offset past the end or inside a surrogate pair is badOffset
     }
 }
 
-unittest // the Lossy functions validate even when the regex has noUtfCheck
+@("the Lossy functions validate even when the regex has noUtfCheck")
+unittest
 {
     immutable wchar high = 0xD800;
     foreach (jitOff; [Flags.none, Flags.noJit])
@@ -528,7 +556,8 @@ unittest // the Lossy functions validate even when the regex has noUtfCheck
     }
 }
 
-unittest // a Lossy range ends with an error if another Lossy call rewrote its buffer
+@("a Lossy range ends with an error if another Lossy call rewrote its buffer")
+unittest
 {
     immutable wchar high = 0xD800;
     auto re = mk(`a`w, Flags.utf);
@@ -553,7 +582,8 @@ unittest // a Lossy range ends with an error if another Lossy call rewrote its b
     assert(n == 3 && r2.status == MatchStatus.noMatch);
 }
 
-unittest // noUtfCheck does not let a start offset inside a surrogate pair through, with or without JIT
+@("noUtfCheck does not let a start offset inside a surrogate pair through, with or without JIT")
+unittest
 {
     foreach (jitOff; [Flags.none, Flags.noJit])
     {
@@ -564,4 +594,57 @@ unittest // noUtfCheck does not let a start offset inside a surrogate pair throu
         assert(md.match("a😀x"w, 3) == MatchStatus.match && md.group(0) == Capture(3, 4, true));
         assert(md.match("ab"w, 5) == MatchStatus.badOffset);
     }
+}
+
+@("the Lossy functions allocate nothing on the GC heap, not even when they repair a text")
+unittest
+{
+    import core.memory : GC;
+
+    static void body() @nogc nothrow
+    {
+        CompileError e;
+        auto re = Regex.compile(`a.b`w, Flags.utf, e);
+        assert(re.valid);
+        bool ok;
+        auto md = MatchData.createFromPattern(re, ok);
+        assert(ok);
+        wchar[3] bad = ['a', 0xD800, 'b'];
+        foreach (round; 0 .. 3) // the first round grows the buffer, the others reuse it
+        {
+            assert(md.matchLossy(bad[]) == MatchStatus.match);
+            size_t n;
+            for (auto r = md.matchesLossy(bad[]); !r.empty; r.popFront())
+                ++n;
+            assert(n == 1);
+        }
+    }
+
+    const before = GC.stats().usedSize;
+    body();
+    assert(GC.stats().usedSize == before);
+}
+
+@("a Lossy range survives a Lossy call that did not rewrite the buffer, and plain matches do not touch it")
+unittest
+{
+    immutable wchar high = 0xD800;
+    auto re = mk(`a`w, Flags.utf);
+    auto md = scratch(re);
+    const text = "a"w ~ high ~ "a"w ~ high ~ "a"w;
+    auto r = md.matchesLossy(text);
+    size_t n;
+    for (; !r.empty; r.popFront())
+    {
+        ++n;
+        assert(md.matchLossy("aaa"w) == MatchStatus.match); // valid text: no repair, no rewrite
+    }
+    assert(n == 3 && r.status == MatchStatus.noMatch);
+
+    // a plain `match` on another text does not rewrite the repair buffer either (it only changes the groups)
+    auto r2 = md.matchesLossy(text);
+    assert(!r2.empty);
+    md.match("zzz"w);
+    r2.popFront();
+    assert(r2.status != MatchStatus.error);
 }
