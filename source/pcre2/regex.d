@@ -23,12 +23,14 @@ enum Flags : uint
     utf = 1 << 4, /// treat pattern and subject as UTF-16 (surrogate pairs, Unicode case folding)
     noUtfCheck = 1 << 5, /// caller guarantees valid UTF-16 subjects: skip the validity check
     noJit = 1 << 6, /// do not JIT compile even if the library supports it
-    /// Unicode properties for `\d \w \s \b` and POSIX classes (PCRE2_UCP). Requires `utf`.
+    /// Unicode properties for `\d \w \s \b` and POSIX classes (PCRE2_UCP).
     ucp = 1 << 7,
     /// A subject with invalid UTF-16 (a lone surrogate) is matched instead of failing with
     /// `MatchStatus.badUtf`: the invalid units simply never match a character. Requires `utf`.
     /// Offsets stay in code units of the original subject. `noUtfCheck` is then irrelevant, and
-    /// matching always goes through `pcre2_match`.
+    /// matching always goes through `pcre2_match`, which scans the subject for invalid units on every
+    /// call: iterating a long subject with many matches costs O(length) per match. For that, or if you
+    /// want the units read as U+FFFD, use `MatchData.matchLossy` / `matchesLossy` instead.
     matchInvalidUtf = 1 << 8,
 }
 
@@ -49,7 +51,7 @@ enum MatchStatus : ubyte
     depthLimit,
     heapLimit,
     jitStackLimit, /// the JIT stack ran out
-    badUtf, /// subject is not valid UTF-16 (e.g. a lone surrogate); see `MatchData.badUtfOffset`
+    badUtf, /// subject is not valid UTF-16 (e.g. a lone surrogate); see `MatchData.getStartchar`
     error, /// anything else; see `MatchData.errorCode`
 }
 
@@ -71,7 +73,8 @@ struct CompileError
 }
 
 /// Writes the PCRE2 message for `code` into `buf` (ASCII narrowed to char) and returns the used slice.
-const(char)[] errorMessage(int code, char[] buf) nothrow @nogc @trusted
+/// (`pcre2_get_error_message`)
+const(char)[] getErrorMessage(int code, char[] buf) nothrow @nogc @trusted
 {
     wchar[256] tmp = void;
     const n = pcre2_get_error_message_16(code, tmp.ptr, tmp.length);
@@ -83,11 +86,28 @@ const(char)[] errorMessage(int code, char[] buf) nothrow @nogc @trusted
     return buf[0 .. i];
 }
 
-/// True if the linked PCRE2 was built with the JIT compiler.
-bool libraryHasJit() nothrow @nogc @trusted
+/// Former name of `getErrorMessage`.
+alias errorMessage = getErrorMessage;
+
+/// What `config` asks about the linked PCRE2 library (`PCRE2_CONFIG_*`).
+enum ConfigWhat : uint
+{
+    jit = PCRE2_CONFIG_JIT, /// 1 if built with the JIT compiler
+    newline = PCRE2_CONFIG_NEWLINE, /// the default newline convention (a `PCRE2_NEWLINE_*` value)
+    unicode = PCRE2_CONFIG_UNICODE, /// 1 if built with Unicode support
+}
+
+/// Value of a numeric build-time option of the linked library, or -1 on error (`pcre2_config`).
+int config(ConfigWhat what) nothrow @nogc @trusted
 {
     int v;
-    return pcre2_config_16(PCRE2_CONFIG_JIT, &v) == 0 && v == 1;
+    return pcre2_config_16(what, &v) == 0 ? v : -1;
+}
+
+/// True if the linked PCRE2 was built with the JIT compiler (`config(ConfigWhat.jit) == 1`).
+bool libraryHasJit() nothrow @nogc @trusted
+{
+    return config(ConfigWhat.jit) == 1;
 }
 
 private shared size_t lastRegexId;
@@ -202,7 +222,8 @@ struct Regex
     @property uint captureCount() const pure nothrow @nogc @safe { return p.captureCount; }
 
     /// Number of the first group with this name, or -1. `name` is compared as UTF-16 code units.
-    int groupIndex(const(wchar)[] name) const nothrow @nogc @trusted
+    /// (`pcre2_substring_number_from_name`)
+    int substringNumberFromName(const(wchar)[] name) const nothrow @nogc @trusted
     {
         if (p is null) return -1;
         const(wchar)* e = p.nameTable;
@@ -217,6 +238,9 @@ struct Regex
         }
         return -1;
     }
+
+    /// Former name of `substringNumberFromName`.
+    alias groupIndex = substringNumberFromName;
 
     /// Number of named groups, and the i-th (in table order, i.e. sorted by name) name / group number.
     @property uint namedGroupCount() const pure nothrow @nogc @safe { return p ? p.nameCount : 0; }
@@ -247,12 +271,15 @@ struct MatchData
         int rc; // last pcre2_match result (> 0: matched, count of groups incl. 0)
         int err; // last error code (< 0), 0 if none
         size_t* ov;
+        wchar* fixBuf; // repaired copy of a subject for the Lossy functions (malloc'd, reused)
+        size_t fixCap;
     }
 
     @disable this(this);
 
     /// Creates scratch for `re` (keeps `re` alive). Returns false in `ok` on out-of-memory.
-    static MatchData create(ref const Regex re, out bool ok) nothrow @nogc @trusted
+    /// (`pcre2_match_data_create_from_pattern`, plus the match context and the JIT stack)
+    static MatchData createFromPattern(ref const Regex re, out bool ok) nothrow @nogc @trusted
     {
         MatchData m;
         ok = false;
@@ -277,6 +304,9 @@ struct MatchData
         return m;
     }
 
+    /// Former name of `createFromPattern`.
+    alias create = createFromPattern;
+
     ~this() pure nothrow @nogc @trusted
     {
         (cast(PureMatchDataFn) &destroyMatchData)(&this);
@@ -294,16 +324,20 @@ struct MatchData
         if (stack) pcre2_jit_stack_free_16(stack);
         if (mc) pcre2_match_context_free_16(mc);
         if (md) pcre2_match_data_free_16(md);
-        stack = null; mc = null; md = null;
+        if (fixBuf) free(fixBuf);
+        stack = null; mc = null; md = null; fixBuf = null; fixCap = 0;
     }
 
     @property bool valid() const pure nothrow @nogc @safe { return pl !is null; }
 
-    /// Searches `subject` from code unit offset `start`. `extraOptions` is for internal use.
-    MatchStatus search(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
+    /// Matches `subject` from code unit offset `start` (`pcre2_match`). Groups are then available.
+    MatchStatus match(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
     {
         return run(subject, start, (pl.noUtfCheck && !(pl.options & PCRE2_MATCH_INVALID_UTF)) ? PCRE2_NO_UTF_CHECK : 0);
     }
+
+    /// Former name of `match`.
+    alias search = match;
 
     private MatchStatus run(const(wchar)[] subject, size_t start, uint opts) nothrow @nogc @trusted
     {
@@ -335,8 +369,11 @@ struct MatchData
     /// PCRE2 error code of the last failed `search` (0 if none).
     @property int errorCode() const pure nothrow @nogc @safe { return err; }
 
-    /// After `MatchStatus.badUtf`: code unit offset of the offending unit.
-    @property size_t badUtfOffset() nothrow @nogc @trusted { return pcre2_get_startchar_16(md); }
+    /// After `MatchStatus.badUtf`: code unit offset of the offending unit (`pcre2_get_startchar`).
+    @property size_t getStartchar() nothrow @nogc @trusted { return pcre2_get_startchar_16(md); }
+
+    /// Same as `getStartchar`, under a name that says what it is used for.
+    alias badUtfOffset = getStartchar;
 
     /// Number of groups (including 0) the last match could report: `regex.captureCount + 1`.
     @property uint groupCount() const pure nothrow @nogc @trusted { return pl.captureCount + 1; }
@@ -355,8 +392,71 @@ struct MatchData
     /// Group by name; unknown name gives a non-participating capture.
     Capture group(ref const Regex re, const(wchar)[] name) const nothrow @nogc @trusted
     {
-        const n = re.groupIndex(name);
+        const n = re.substringNumberFromName(name);
         return n < 0 ? Capture(0, 0, false) : group(cast(uint) n);
+    }
+
+    /// `match` that reads each lone surrogate of `subject` as U+FFFD (an ordinary character: `.` and `[^a]` take
+    /// it, unlike with `Flags.matchInvalidUtf`, where an invalid unit matches nothing). The text is copied
+    /// only if it is not valid UTF-16; the copy has the same length, so every offset is that of `subject`.
+    /// Returns `MatchStatus.error` if the copy cannot be allocated. The copy lives in this `MatchData` until
+    /// the next Lossy call.
+    MatchStatus matchLossy(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
+    {
+        auto st = match(subject, start);
+        if (st != MatchStatus.badUtf)
+            return st;
+        const fixed = repaired(subject);
+        if (fixed is null)
+        {
+            err = PCRE2_ERROR_NOMEMORY;
+            return MatchStatus.error;
+        }
+        return match(fixed, start);
+    }
+
+    /// `matches` that reads lone surrogates as U+FFFD, like `matchLossy`. The subject given to the range is
+    /// the copy while one is needed, so keep this `MatchData` unused by other Lossy calls during iteration.
+    Matches matchesLossy(const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
+    {
+        auto r = matches(subject, start);
+        if (r.status != MatchStatus.badUtf)
+            return r;
+        const fixed = repaired(subject);
+        if (fixed is null)
+        {
+            err = PCRE2_ERROR_NOMEMORY;
+            r.status = MatchStatus.error;
+            return r;
+        }
+        return matches(fixed, start);
+    }
+
+    // `subject` with each lone surrogate replaced by U+FFFD, in the buffer of this MatchData; null if out of memory
+    private const(wchar)[] repaired(const(wchar)[] subject) nothrow @nogc @trusted
+    {
+        import core.stdc.stdlib : realloc;
+
+        if (fixCap < subject.length)
+        {
+            auto grown = cast(wchar*) realloc(fixBuf, subject.length * wchar.sizeof);
+            if (grown is null)
+                return null;
+            fixBuf = grown;
+            fixCap = subject.length;
+        }
+        auto o = fixBuf[0 .. subject.length];
+        foreach (i, unit; subject)
+        {
+            const high = unit >= 0xD800 && unit <= 0xDBFF, low = unit >= 0xDC00 && unit <= 0xDFFF;
+            o[i] = unit;
+            if (high && !(i + 1 < subject.length && subject[i + 1] >= 0xDC00 && subject[i + 1] <= 0xDFFF))
+                o[i] = 0xFFFD;
+            else if (low && !(i > 0 && subject[i - 1] >= 0xD800 && subject[i - 1] <= 0xDBFF
+                    && o[i - 1] == subject[i - 1]))
+                o[i] = 0xFFFD;
+        }
+        return o;
     }
 
     /// Lazy range over all non-overlapping matches in `subject` (front = whole match, `Capture`).
@@ -366,8 +466,8 @@ struct MatchData
     /// The first search runs inside this call, so the range is already positioned on the first match.
     /// If the subject is not valid UTF-16 (and `Flags.matchInvalidUtf` / `noUtfCheck` are not set),
     /// the range is returned empty with `status == MatchStatus.badUtf` before any element was
-    /// produced (`badUtfOffset` says where); a caller may then repair the text and call again. The
-    /// subject is validated once; later steps skip the check. A limit stop (`matchLimit`, ...) is
+    /// produced (`getStartchar` says where); a caller may then repair the text and call again. The
+    /// subject is validated once; later steps skip the check (not with `Flags.matchInvalidUtf`, see there). A limit stop (`matchLimit`, ...) is
     /// reported the same way: an empty range or a range that ends early, with that `status`.
     Matches matches(const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
     {

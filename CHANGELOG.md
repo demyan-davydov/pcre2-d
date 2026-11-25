@@ -3,7 +3,10 @@
 ## 0.1.1 (2026-11-25)
 
 - `Regex.this(this)`, `Regex.~this()` and `MatchData.~this()` are `pure nothrow @nogc`: `pure` code (constructors, `dup`)
-  can hold a `Regex` by value, so dependents can drop class wrappers around it. Dependents may raise `~>0.1.0` to `~>0.1.1`.
+  can hold a `Regex` by value, so dependents can drop class wrappers around it. Dependents that rely on this should require `~>0.1.1`: `~>0.1.0` also accepts 0.1.0, which has no `pure`.
+- Names follow the C functions: `match` (was `search`), `getErrorMessage`, `getStartchar`, `substringNumberFromName`,
+  `createFromPattern`, `config(ConfigWhat)`; the old names stay as aliases.
+- New `MatchData.matchLossy` and `matchesLossy`: lone surrogates are read as U+FFFD, offsets stay those of the subject.
 - New `Regex.id`: process-unique number of a compiled pattern.
 - New `Flags.ucp` (PCRE2_UCP) and `Flags.matchInvalidUtf` (PCRE2_MATCH_INVALID_UTF).
 - Fix: stepping over an empty match no longer skips a valid character after a lone high surrogate.

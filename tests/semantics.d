@@ -23,7 +23,7 @@ private Regex mk(const(wchar)[] pat, Flags f)
 private MatchData scratch(ref Regex re)
 {
     bool ok;
-    auto m = MatchData.create(re, ok);
+    auto m = MatchData.createFromPattern(re, ok);
     assert(ok);
     return m;
 }
@@ -38,7 +38,7 @@ private long[2] find(const(wchar)[] pat, const(wchar)[] subj, Flags f = Flags.ut
         assert(jitOff == Flags.none || !re.jitEnabled);
         auto md = scratch(re);
         long[2] cur = [-1, -1];
-        if (md.search(subj) == MatchStatus.match)
+        if (md.match(subj) == MatchStatus.match)
             cur = [cast(long) md.group(0).begin, cast(long) md.group(0).end];
         assert(jitOff == Flags.none || cur == res, "JIT and interpreter disagree");
         res = cur;
@@ -96,15 +96,15 @@ unittest // groups: participation vs empty, named groups
         auto re = mk(`(a)|(b)(c*)(?<tail>d)?`w, Flags.utf | jitOff);
         assert(re.captureCount == 4);
         auto md = scratch(re);
-        assert(md.search("xb"w) == MatchStatus.match);
+        assert(md.match("xb"w) == MatchStatus.match);
         assert(md.group(0) == Capture(1, 2, true));
         assert(!md.group(1).participated); // group 1 did not participate
         assert(md.group(2) == Capture(1, 2, true));
         assert(md.group(3).participated && md.group(3).length == 0); // empty but participated
         assert(!md.group(4).participated);
-        assert(re.groupIndex("tail"w) == 4);
-        assert(re.groupIndex("nope"w) == -1);
-        assert(md.search("bccd"w) == MatchStatus.match);
+        assert(re.substringNumberFromName("tail"w) == 4);
+        assert(re.substringNumberFromName("nope"w) == -1);
+        assert(md.match("bccd"w) == MatchStatus.match);
         assert(md.group(re, "tail"w) == Capture(3, 4, true));
         assert(re.namedGroupCount == 1);
         uint num;
@@ -119,7 +119,7 @@ unittest // compile errors carry the pattern offset
     assert(!re.valid);
     assert(e.code != 0 && e.offset == 4);
     char[256] buf;
-    assert(errorMessage(e.code, buf[]).length > 0);
+    assert(getErrorMessage(e.code, buf[]).length > 0);
     auto re2 = Regex.compile(`a[`w, Flags.utf, e);
     assert(!re2.valid && e.offset == 2);
 }
@@ -132,11 +132,11 @@ unittest // UTF validity: a lone surrogate in the subject is an error, not a cra
     {
         auto re = mk(`b`w, Flags.utf | jitOff);
         auto md = scratch(re);
-        assert(md.search(s[]) == MatchStatus.badUtf);
-        assert(md.badUtfOffset == 1);
-        assert(md.search(t[]) == MatchStatus.badUtf);
+        assert(md.match(s[]) == MatchStatus.badUtf);
+        assert(md.getStartchar == 1);
+        assert(md.match(t[]) == MatchStatus.badUtf);
         // valid pair is fine
-        assert(md.search("a😀b"w) == MatchStatus.match);
+        assert(md.match("a😀b"w) == MatchStatus.match);
         assert(md.group(0) == Capture(3, 4, true));
     }
 }
@@ -145,9 +145,9 @@ unittest // positions are UTF-16 code units; start offset
 {
     auto re = mk(`é+`w, Flags.utf);
     auto md = scratch(re);
-    assert(md.search("😀ééé"w) == MatchStatus.match);
+    assert(md.match("😀ééé"w) == MatchStatus.match);
     assert(md.group(0) == Capture(2, 5, true));
-    assert(md.search("éxé"w, 1) == MatchStatus.match);
+    assert(md.match("éxé"w, 1) == MatchStatus.match);
     assert(md.group(0).begin == 2);
 }
 
@@ -196,11 +196,11 @@ unittest // limits: a catastrophic pattern ends with an error value
         auto re = Regex.compile(`(a+)+$`w, Flags.utf | jitOff, e, Limits(10_000, 10_000, 20_000_000));
         assert(re.valid);
         auto md = scratch(re);
-        auto st = md.search(bad[]);
+        auto st = md.match(bad[]);
         assert(st == MatchStatus.matchLimit, "catastrophic backtracking must hit the match limit");
         assert(md.errorCode == PCRE2_ERROR_MATCHLIMIT);
         // the same scratch still works afterwards
-        assert(md.search(subj[]) == MatchStatus.match);
+        assert(md.match(subj[]) == MatchStatus.match);
     }
 }
 
@@ -210,7 +210,7 @@ unittest // depth limit (interpreter)
     CompileError e;
     auto re = Regex.compile(`(?:a|b)*c`w, Flags.utf | Flags.noJit, e, Limits(10_000_000, 5, 20_000_000));
     auto md = scratch(re);
-    auto st = md.search(s[]);
+    auto st = md.match(s[]);
     assert(st == MatchStatus.depthLimit || st == MatchStatus.noMatch, "depth limit status");
 }
 
@@ -222,7 +222,7 @@ unittest // JIT availability is reported and the interpreter is a working fallba
     assert(a.jitEnabled == libraryHasJit() || !a.jitEnabled); // JIT may fail at runtime (e.g. no W^X permission)
     assert(!b.jitEnabled);
     auto md = scratch(b);
-    assert(md.search("baa"w) == MatchStatus.match && md.group(0) == Capture(1, 3, true));
+    assert(md.match("baa"w) == MatchStatus.match && md.group(0) == Capture(1, 3, true));
     version (unittest) printf("JIT in this build: %d\n", cast(int) a.jitEnabled);
 }
 
@@ -242,15 +242,15 @@ unittest // the same Regex matched from several threads
         ths[i] = new Thread({
             auto local = re; // refcounted copy
             bool ok;
-            auto md = MatchData.create(local, ok);
+            auto md = MatchData.createFromPattern(local, ok);
             if (!ok) return;
             bool good = true;
             foreach (k; 0 .. 20_000)
             {
-                if (md.search("abc 123-x def"w) != MatchStatus.match || md.group(0) != Capture(4, 8, true)
+                if (md.match("abc 123-x def"w) != MatchStatus.match || md.group(0) != Capture(4, 8, true)
                     || md.group(1) != Capture(4, 7, true))
                     good = false;
-                if (md.search("abc 123-y"w) != MatchStatus.noMatch)
+                if (md.match("abc 123-y"w) != MatchStatus.noMatch)
                     good = false;
             }
             if (good) atomicOp!"+="(okCount, 1);
@@ -271,7 +271,7 @@ unittest // the whole API is @nogc nothrow and allocates nothing on the GC heap 
         auto re = Regex.compile(`(?<w>\w+)@(\w+)`w, Flags.utf | Flags.caseless, e);
         assert(re.valid);
         bool ok;
-        auto md = MatchData.create(re, ok);
+        auto md = MatchData.createFromPattern(re, ok);
         assert(ok);
         size_t n;
         for (auto r = md.matches("a@b c@d x"w); !r.empty; r.popFront())
@@ -280,7 +280,7 @@ unittest // the whole API is @nogc nothrow and allocates nothing on the GC heap 
         char[128] buf;
         CompileError e2;
         auto bad = Regex.compile(`(`w, Flags.utf, e2);
-        assert(!bad.valid && errorMessage(e2.code, buf[]).length);
+        assert(!bad.valid && getErrorMessage(e2.code, buf[]).length);
     }
 
     const before = GC.stats().usedSize;
@@ -308,7 +308,7 @@ unittest // Flags.matchInvalidUtf: a lone surrogate is not an error, offsets are
         auto md0 = scratch(plain);
         auto r0 = md0.matches(subj);
         assert(r0.empty && r0.status == MatchStatus.badUtf);
-        assert(md0.badUtfOffset == 3);
+        assert(md0.getStartchar == 3);
 
         auto re = mk(`ok`w, Flags.utf | Flags.matchInvalidUtf | jitOff);
         auto md = scratch(re);
@@ -318,7 +318,7 @@ unittest // Flags.matchInvalidUtf: a lone surrogate is not an error, offsets are
             all ~= [r.front.begin, r.front.end];
         assert(r.status == MatchStatus.noMatch);
         assert(all == [[0, 2], [5, 7]]);
-        assert(md.search(subj) == MatchStatus.match);
+        assert(md.match(subj) == MatchStatus.match);
 
         auto dots = mk(`.`w, Flags.utf | Flags.matchInvalidUtf | jitOff);
         auto md2 = scratch(dots);
@@ -359,5 +359,122 @@ unittest // Regex and MatchData can be held by value in pure code
     auto h2 = make(h);
     assert(h2.re.valid && h2.re.id == h.re.id);
     bool ok;
-    useMatchData(MatchData.create(h.re, ok));
+    useMatchData(MatchData.createFromPattern(h.re, ok));
+}
+
+unittest // the former names stay as aliases
+{
+    auto re = mk(`(?<k>a)`w, Flags.utf);
+    auto md = scratch(re);
+    assert(md.search("xa"w) == MatchStatus.match);
+    assert(re.groupIndex("k"w) == 1);
+    CompileError e;
+    char[64] buf;
+    Regex.compile(`(`w, Flags.utf, e);
+    assert(errorMessage(e.code, buf[]) == getErrorMessage(e.code, buf[]));
+    bool ok;
+    auto md2 = MatchData.create(re, ok);
+    assert(ok && libraryHasJit() == (config(ConfigWhat.jit) == 1));
+    assert(config(ConfigWhat.unicode) == 1);
+}
+
+unittest // matchLossy / matchesLossy: a lone surrogate reads as U+FFFD, offsets are the original ones
+{
+    immutable wchar high = 0xD800, low = 0xDC00;
+    immutable subj = "ok "w ~ high ~ " ok "w ~ low ~ " end"w;
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        auto re = mk(`ok`w, Flags.utf | jitOff);
+        auto md = scratch(re);
+        size_t[2][] all;
+        auto r = md.matchesLossy(subj);
+        for (; !r.empty; r.popFront())
+            all ~= [r.front.begin, r.front.end];
+        assert(r.status == MatchStatus.noMatch);
+        assert(all == [[0, 2], [5, 7]]);
+
+        assert(md.matchLossy(subj) == MatchStatus.match);
+        assert(md.group(0) == Capture(0, 2, true));
+        assert(md.matchLossy(subj, 3) == MatchStatus.match);
+        assert(md.group(0) == Capture(5, 7, true));
+
+        // U+FFFD is an ordinary character: `.` takes the lone surrogate (not so with matchInvalidUtf)
+        auto dot = mk(`^a.b$`w, Flags.utf | jitOff);
+        auto md2 = scratch(dot);
+        assert(md2.match("a"w ~ high ~ "b"w) == MatchStatus.badUtf);
+        assert(md2.matchLossy("a"w ~ high ~ "b"w) == MatchStatus.match);
+        assert(md2.group(0) == Capture(0, 3, true));
+        assert(md2.matchLossy("a"w ~ low ~ "b"w) == MatchStatus.match);
+        // a valid pair next to broken ones stays a pair
+        assert(md2.matchLossy("a😀b"w) == MatchStatus.match && md2.group(0).end == 4);
+        auto dots = mk(`^.{3}$`w, Flags.utf | jitOff);
+        auto md3 = scratch(dots);
+        assert(md3.matchLossy("a"w ~ high ~ high ~ low ~ "b"w) == MatchStatus.noMatch); // a, FFFD, pair, b = 4 chars
+        assert(md3.matchLossy("a"w ~ low ~ low) == MatchStatus.match); // a, FFFD, FFFD
+
+        auto inv = mk(`^a.b$`w, Flags.utf | Flags.matchInvalidUtf | jitOff);
+        auto md4 = scratch(inv);
+        assert(md4.match("a"w ~ high ~ "b"w) == MatchStatus.noMatch); // an invalid unit matches nothing
+    }
+}
+
+unittest // matchLossy with limits: the status is still reported
+{
+    import std.array : replicate;
+    import std.conv : to;
+
+    auto re = mk(`(a+)+b`w, Flags.utf);
+    auto md = scratch(re);
+    const text = ("a".replicate(5000) ~ "!b").to!wstring;
+    assert(md.matchLossy(text) == MatchStatus.matchLimit);
+    auto r = md.matchesLossy(text);
+    assert(r.empty && r.status == MatchStatus.matchLimit);
+    const withBad = ("a".replicate(5000) ~ "!b").to!wstring ~ cast(wchar) 0xD800;
+    r = md.matchesLossy(withBad);
+    assert(r.empty && r.status == MatchStatus.matchLimit);
+}
+
+unittest // matchInvalidUtf together with noUtfCheck, exact offsets
+{
+    immutable wchar high = 0xD800;
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        auto re = mk(`.`w, Flags.utf | Flags.matchInvalidUtf | Flags.noUtfCheck | jitOff);
+        auto md = scratch(re);
+        size_t[2][] all;
+        for (auto r = md.matches("a"w ~ high ~ "b"w); !r.empty; r.popFront())
+            all ~= [r.front.begin, r.front.end];
+        assert(all == [[0, 1], [2, 3]]);
+    }
+}
+
+unittest // a Regex copied and destroyed from pure code by many threads keeps its refcount right
+{
+    import core.thread : Thread;
+
+    static Regex copyAround(Regex r) pure nothrow @nogc @trusted
+    {
+        Regex c = r;
+        Regex d = c;
+        return d;
+    }
+
+    auto re = mk(`a+`w, Flags.utf);
+    Thread[] ths;
+    foreach (t; 0 .. 8)
+    {
+        ths ~= new Thread({
+            foreach (i; 0 .. 200_000)
+            {
+                auto c = copyAround(re);
+                assert(c.valid);
+            }
+        });
+        ths[$ - 1].start();
+    }
+    foreach (t; ths)
+        t.join();
+    bool ok;
+    auto md = MatchData.createFromPattern(re, ok);
+    assert(ok && md.match("caab"w) == MatchStatus.match && md.group(0) == Capture(1, 3, true));
 }
