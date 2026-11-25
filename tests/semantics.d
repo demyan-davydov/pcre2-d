@@ -3,6 +3,7 @@ module semantics;
 
 import pcre2;
 import core.stdc.stdio : printf;
+import std.typecons : tuple;
 import pcre2.c_api : PCRE2_ERROR_MATCHLIMIT, PCRE2_ERROR_NULL, PCRE2_ERROR_DEPTHLIMIT;
 
 private struct T
@@ -647,4 +648,57 @@ unittest
     md.match("zzz"w);
     r2.popFront();
     assert(r2.status != MatchStatus.error);
+}
+
+@("pcre2_jit_match accepts PCRE2_NO_UTF_CHECK: the fast path of the Lossy functions depends on it")
+unittest
+{
+    import pcre2.c_api;
+
+    if (!libraryHasJit())
+        return;
+    int ec;
+    size_t eo;
+    static immutable wchar[5] pat = ['E', 'R', 'R', 'O', 'R'];
+    auto code = pcre2_compile_16(pat.ptr, pat.length, PCRE2_UTF, &ec, &eo, null);
+    assert(code !is null);
+    assert(pcre2_jit_compile_16(code, PCRE2_JIT_COMPLETE) == 0);
+    auto md = pcre2_match_data_create_from_pattern_16(code, null);
+    auto mc = pcre2_match_context_create_16(null);
+    static immutable wchar[8] text = ['a', ' ', 'E', 'R', 'R', 'O', 'R', ' '];
+    const rc = pcre2_jit_match_16(code, text.ptr, text.length, 0, PCRE2_NO_UTF_CHECK, md, mc);
+    assert(rc > 0, "jit_match with PCRE2_NO_UTF_CHECK");
+    assert(pcre2_get_ovector_pointer_16(md)[0] == 2 && pcre2_get_ovector_pointer_16(md)[1] == 7);
+    pcre2_match_context_free_16(mc);
+    pcre2_match_data_free_16(md);
+    pcre2_code_free_16(code);
+}
+
+@("matchLossy and matchesLossy: same answers and offsets for texts with no surrogate, a valid pair, a lone surrogate")
+unittest
+{
+    immutable wchar high = 0xD800, low = 0xDC00;
+    immutable wstring plain = "xx ERROR yy"w;
+    immutable wstring paired = "xx 😀 ERROR yy"w;
+    immutable wstring lone = "xx "w ~ high ~ " ERROR "w ~ low ~ " yy"w;
+    foreach (flags; [Flags.utf, Flags.utf | Flags.noUtfCheck])
+        foreach (jitOff; [Flags.none, Flags.noJit])
+        {
+            auto re = mk(`\bERROR\b`w, flags | jitOff);
+            auto md = scratch(re);
+            // (text, begin, end) of the match, which lie in the text as it is
+            foreach (t; [tuple(plain, 3, 8), tuple(paired, 6, 11), tuple(lone, 5, 10)])
+            {
+                assert(md.matchLossy(t[0]) == MatchStatus.match);
+                assert(md.group(0) == Capture(t[1], t[2], true));
+                auto r = md.matchesLossy(t[0]);
+                assert(!r.empty && r.front == Capture(t[1], t[2], true));
+                r.popFront();
+                assert(r.empty && r.status == MatchStatus.noMatch);
+                assert(md.matchLossy(t[0], t[2]) == MatchStatus.noMatch);
+            }
+            assert(md.matchLossy(""w) == MatchStatus.noMatch);
+            assert(md.matchLossy("ERROR"w, 5) == MatchStatus.noMatch);
+            assert(md.matchLossy("ERROR"w, 6) == MatchStatus.badOffset);
+        }
 }

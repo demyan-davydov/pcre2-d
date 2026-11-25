@@ -21,7 +21,7 @@ enum Flags : uint
     multiline = 1 << 2, /// `^`/`$` match at line boundaries
     dollarEndOnly = 1 << 3, /// `$` matches only at the very end (unless multiline)
     utf = 1 << 4, /// treat pattern and subject as UTF-16 (surrogate pairs, Unicode case folding)
-    noUtfCheck = 1 << 5, /// caller guarantees valid UTF-16 subjects: skip the validity check
+    noUtfCheck = 1 << 5, /// caller guarantees valid UTF-16 subjects: skip the validity check (`match` then uses `pcre2_jit_match` with JIT); `matchLossy` still validates texts with surrogates
     noJit = 1 << 6, /// do not JIT compile even if the library supports it
     /// Unicode properties for `\d \w \s \b` and POSIX classes (PCRE2_UCP).
     ucp = 1 << 7,
@@ -429,13 +429,17 @@ struct MatchData
     /// only if it is not valid UTF-16; the copy has the same length, so every offset is that of `subject`.
     /// Returns `MatchStatus.error` if the copy cannot be allocated. The copy lives in this `MatchData` until
     /// the next Lossy call. With `Flags.matchInvalidUtf` nothing is ever repaired (that flag already accepts
-    /// the subject).
+    /// the subject). A subject with no surrogate unit at all is known to be valid and matched without the UTF
+    /// check of PCRE2 (through `pcre2_jit_match` for a JIT-compiled pattern); otherwise the check is made even
+    /// if the regex was compiled with `noUtfCheck`, unlike `match`.
     MatchStatus matchLossy(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
     {
         if (pl is null)
             return nullStatus();
-        // the subject is validated here even for a regex compiled with `noUtfCheck`: that is the point
-        auto st = run(subject, start, 0);
+        // A text without any surrogate unit is valid UTF-16, so the check of PCRE2 (about half of the cost of a
+        // short match) is skipped; with a surrogate, paired or lone, the text is validated here even for a regex
+        // compiled with `noUtfCheck`: that is the point of the function.
+        auto st = run(subject, start, hasSurrogate(subject) ? 0 : PCRE2_NO_UTF_CHECK);
         if (st != MatchStatus.badUtf)
             return st;
         const fixed = repaired(subject);
@@ -471,7 +475,10 @@ struct MatchData
     private Matches matchesChecked(const(wchar)[] subject, size_t start) return nothrow @nogc @trusted
     {
         auto r = Matches(&this, subject, start);
-        r.forceCheck = true;
+        if (hasSurrogate(subject))
+            r.forceCheck = true;
+        else
+            r.skipCheck = true; // no surrogate unit: valid UTF-16, no need to validate
         r.advance();
         return r;
     }
@@ -522,6 +529,16 @@ struct MatchData
     }
 }
 
+// True if `text` has any surrogate unit (paired or lone). Without one it is valid UTF-16. Branch free, so that a
+// compiler vectorizes the loop.
+private bool hasSurrogate(const(wchar)[] text) pure nothrow @nogc @safe
+{
+    bool any = false;
+    foreach (unit; text)
+        any |= (unit & 0xF800) == 0xD800;
+    return any;
+}
+
 /// Input range returned by `MatchData.matches`. Holds a pointer to the `MatchData`.
 struct Matches
 {
@@ -532,6 +549,7 @@ struct Matches
     private bool started;
     private bool done;
     private bool forceCheck; // validate the first subject even if the regex has noUtfCheck
+    private bool skipCheck; // the subject is known to be valid: no check, even for the first step
     private size_t gen; // not 0: the subject is the repair buffer of the MatchData, valid while its fixGen is this
     /// `noMatch` after normal exhaustion; otherwise the status that stopped the iteration.
     MatchStatus status = MatchStatus.noMatch;
@@ -563,7 +581,7 @@ struct Matches
         // After the first successful call the subject is known valid: skip re-validation (avoids O(n^2)).
         const invalidOk = (m.pl.options & PCRE2_MATCH_INVALID_UTF) != 0;
         uint extra = 0;
-        if (!invalidOk && (started || (m.pl.noUtfCheck && !forceCheck)))
+        if (!invalidOk && (started || skipCheck || (m.pl.noUtfCheck && !forceCheck)))
             extra = PCRE2_NO_UTF_CHECK;
         if (emptyPrev)
             extra |= PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;

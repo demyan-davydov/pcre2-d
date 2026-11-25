@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 (unreleased)
+
+- `matchLossy` / `matchesLossy`: a text without any surrogate unit is matched without the UTF check (through
+  `pcre2_jit_match` for a JIT-compiled pattern). Results are the same; short valid texts match much faster.
+
 ## 0.1.1 (2026-11-25)
 
 - `Regex.this(this)`, `Regex.~this()` and `MatchData.~this()` are `pure nothrow @nogc`: `pure` code (constructors, `dup`)

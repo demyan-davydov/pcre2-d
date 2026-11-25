@@ -61,6 +61,11 @@ for (auto m = md.matches("a=1 B=22"w); !m.empty; m.popFront())
   invalid unit matches nothing (but it rescans the subject at each match). The repair buffer is rewritten by every
   Lossy call on the same `MatchData`; a `matchesLossy` range notices that and ends with `MatchStatus.error`. The Lossy
   functions validate the text even for a regex compiled with `noUtfCheck`.
+- UTF check and speed: with `Flags.noUtfCheck`, `match` skips the validity check of PCRE2 (and uses `pcre2_jit_match`
+  for a JIT-compiled pattern). `matchLossy` / `matchesLossy` validate by design, but first look for any surrogate unit
+  (a branch-free loop): a text with none is valid UTF-16 and is matched without the check, so the common case costs
+  the same as `noUtfCheck`; a text with a surrogate (paired or lone) is validated and, if needed, repaired. On short
+  log messages the PCRE2 check is about half of the cost of a simple match.
 - `badOffset`: `start` is past the end of the subject or inside a surrogate pair. An invalid `Regex` / `MatchData` gives
   `error` / 0 values instead of crashing.
 - Ownership and threading: [OWNERSHIP.md](OWNERSHIP.md). `Regex` is shared and immutable; `MatchData` is per thread.
