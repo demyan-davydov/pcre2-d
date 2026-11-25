@@ -4,6 +4,13 @@
 
 - `matchLossy` / `matchesLossy`: a text without any surrogate unit is matched without the UTF check (through
   `pcre2_jit_match` for a JIT-compiled pattern). Results are the same; short valid texts match much faster.
+  The text is scanned for surrogates only from where PCRE2 can read it (`start` minus the longest look-behind).
+
+Known issues (open):
+
+- Nothing in the tests shows that the fast path of `matchLossy` / `matchesLossy` is really taken: the tests compare
+  answers only, so a change that validates every text again would pass them and lose the speed-up silently.
+  Deferred: it needs a hook in the library for the unittest build or a benchmark kept outside the test run.
 
 ## 0.1.1 (2026-11-25)
 

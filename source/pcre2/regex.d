@@ -122,6 +122,7 @@ private struct Payload
     bool noUtfCheck;
     bool jit;
     uint captureCount;
+    uint maxLookbehind; // characters (a `\b` counts one): how far before `start` a match can read
     Limits limits;
     uint nameCount;
     uint nameEntrySize;
@@ -191,6 +192,7 @@ struct Regex
         pl.noUtfCheck = (flags & Flags.noUtfCheck) != 0;
         pl.limits = limits;
         pcre2_pattern_info_16(code, PCRE2_INFO_CAPTURECOUNT, &pl.captureCount);
+        pcre2_pattern_info_16(code, PCRE2_INFO_MAXLOOKBEHIND, &pl.maxLookbehind);
         pcre2_pattern_info_16(code, PCRE2_INFO_NAMECOUNT, &pl.nameCount);
         pcre2_pattern_info_16(code, PCRE2_INFO_NAMEENTRYSIZE, &pl.nameEntrySize);
         pcre2_pattern_info_16(code, PCRE2_INFO_NAMETABLE, &pl.nameTable);
@@ -439,7 +441,7 @@ struct MatchData
         // A text without any surrogate unit is valid UTF-16, so the check of PCRE2 (about half of the cost of a
         // short match) is skipped; with a surrogate, paired or lone, the text is validated here even for a regex
         // compiled with `noUtfCheck`: that is the point of the function.
-        auto st = run(subject, start, hasSurrogate(subject) ? 0 : PCRE2_NO_UTF_CHECK);
+        auto st = run(subject, start, hasSurrogate(unreadPrefixSkipped(subject, start)) ? 0 : PCRE2_NO_UTF_CHECK);
         if (st != MatchStatus.badUtf)
             return st;
         const fixed = repaired(subject);
@@ -471,11 +473,21 @@ struct MatchData
         return fr;
     }
 
+    // The part of `subject` a match from `start` can read: PCRE2 looks back at most `maxLookbehind` characters
+    // (two code units each at most) from `start`, and what is before that is never read nor validated.
+    private const(wchar)[] unreadPrefixSkipped(const(wchar)[] subject, size_t start) const pure nothrow @nogc @trusted
+    {
+        if (start >= subject.length)
+            return subject[$ .. $];
+        const back = pl ? cast(size_t) pl.maxLookbehind * 2 : 0;
+        return subject[(start > back ? start - back : 0) .. $];
+    }
+
     // `matches` that validates the subject even when the regex has `noUtfCheck`
     private Matches matchesChecked(const(wchar)[] subject, size_t start) return nothrow @nogc @trusted
     {
         auto r = Matches(&this, subject, start);
-        if (hasSurrogate(subject))
+        if (hasSurrogate(unreadPrefixSkipped(subject, start)))
             r.forceCheck = true;
         else
             r.skipCheck = true; // no surrogate unit: valid UTF-16, no need to validate

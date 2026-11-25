@@ -702,3 +702,32 @@ unittest
             assert(md.matchLossy("ERROR"w, 6) == MatchStatus.badOffset);
         }
 }
+
+@("matchLossy scans for surrogates only from where PCRE2 can read: the start minus the look-behind")
+unittest
+{
+    immutable wchar high = 0xD800;
+    foreach (flags; [Flags.utf, Flags.utf | Flags.noUtfCheck])
+        foreach (jitOff; [Flags.none, Flags.noJit])
+        {
+            // a lone surrogate far before `start` is never read: the answer is the same as before
+            auto re = mk(`ERROR`w, flags | jitOff);
+            auto md = scratch(re);
+            const far = "x"w ~ high ~ " ........ ERROR"w;
+            assert(md.matchLossy(far, 6) == MatchStatus.match && md.group(0) == Capture(12, 17, true));
+            auto r = md.matchesLossy(far, 6);
+            assert(!r.empty && r.front == Capture(12, 17, true));
+
+            // inside the look-behind a lone surrogate is read, so it is repaired: `.` takes it
+            auto lb = mk(`(?<=.)b`w, flags | jitOff);
+            auto md2 = scratch(lb);
+            assert(md2.matchLossy(high ~ "b"w, 1) == MatchStatus.match && md2.group(0) == Capture(1, 2, true));
+            auto r2 = md2.matchesLossy(high ~ "b"w, 1);
+            assert(!r2.empty && r2.front == Capture(1, 2, true));
+
+            // `\b` looks one character back as well
+            auto wb = mk(`\bb`w, flags | jitOff);
+            auto md3 = scratch(wb);
+            assert(md3.matchLossy(high ~ "b"w, 1) == MatchStatus.match);
+        }
+}

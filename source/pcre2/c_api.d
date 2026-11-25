@@ -32,6 +32,7 @@ enum uint PCRE2_JIT_COMPLETE = 0x00000001u;
 
 // pcre2_pattern_info / pcre2_config
 enum uint PCRE2_INFO_CAPTURECOUNT = 4;
+enum uint PCRE2_INFO_MAXLOOKBEHIND = 15;
 enum uint PCRE2_INFO_NAMECOUNT = 17;
 enum uint PCRE2_INFO_NAMEENTRYSIZE = 18;
 enum uint PCRE2_INFO_NAMETABLE = 19;
