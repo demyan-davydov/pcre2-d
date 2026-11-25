@@ -113,6 +113,13 @@ bool libraryHasJit() nothrow @nogc @trusted
 
 private shared size_t lastRegexId;
 
+version (unittest)
+{
+    /// Compiled patterns alive right now (counted only in the unittest build): the tests check that every copy,
+    /// every `MatchData` and every range lets go of its reference, so that the count returns to where it was.
+    shared size_t livePayloads;
+}
+
 private struct Payload
 {
     shared size_t refs;
@@ -143,6 +150,7 @@ private void releasePayload(Payload* pl) nothrow @nogc @trusted
     {
         pcre2_code_free_16(pl.code);
         free(pl);
+        version (unittest) atomicFetchSub(livePayloads, 1);
     }
 }
 
@@ -184,6 +192,7 @@ struct Regex
             return Regex.init;
         }
         *pl = Payload.init;
+        version (unittest) atomicFetchAdd(livePayloads, 1);
         pl.refs = 1;
         pl.id = atomicFetchAdd(lastRegexId, 1) + 1;
         pl.code = code;
