@@ -2,7 +2,7 @@
 
 ## 0.1.3 (unreleased)
 
-- `MatchData` that is not tied to a `Regex`: `MatchData.create(ok, ovectorGroups = 16)`, then
+- `MatchData` that is not tied to a `Regex`: `MatchData.create(ok)` / `create(ovectorGroups, ok)` (`ok` last, as in the other `create`s), then
   `match(re, text)`, `matches(re, text)`, `matchLossy(re, text)`, `matchesLossy(re, text)`. One per thread is enough for any
   number of regexes: the limits of `re` are applied per call, the ovector grows when `re` has more groups, the JIT stack
   is made at the first JIT pattern. A range ends with `error` if another regex is used meanwhile. The old calls

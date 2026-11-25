@@ -55,12 +55,12 @@ for (auto m = md.matches("a=1 B=22"w); !m.empty; m.popFront())
 - **Names** follow the C functions without the `pcre2_` prefix: `match`, `getErrorMessage`, `getStartchar`,
   `substringNumberFromName`, `createFromPattern`, `config`. Extras built on them add a suffix (`matchLossy`,
   `matchesLossy`). The earlier names (`search`, `errorMessage`, `badUtfOffset`, `groupIndex`, `create`) remain as aliases.
-- **One `MatchData` per thread, for any number of regexes.** `MatchData.create(ok)` (optionally with the number of
-  groups to start with, default 16) makes a scratch that is not tied to a `Regex`; give the regex to each call:
+- **One `MatchData` per thread, for any number of regexes.** `MatchData.create(ok)` (or `create(groups, ok)`; default 16
+  groups to start with) makes a scratch that is not tied to a `Regex`; give the regex to each call:
   `md.match(re, text)`, `md.matches(re, text)`, `md.matchLossy(re, text)`, `md.matchesLossy(re, text)`. Before a call it
   takes the limits of `re`, grows its ovector if `re` has more groups, and makes the JIT stack when the first JIT
   pattern comes. Switching regexes costs a few stores, so no cache of scratches is needed. The `Regex` must stay alive
-  while the results or a range over it are used (the `MatchData` keeps no reference); a range ends with
+  while a range over it is used (the `MatchData` keeps no reference; the groups are plain offsets); a range ends with
   `MatchStatus.error` if another regex is used with the same `MatchData` meanwhile. The calls without a regex
   (`createFromPattern(re, ok)` and `md.match(text)`) work as before.
 - `matchLossy` / `matchesLossy`: like `match` / `matches`, but a lone surrogate is read as U+FFFD, an ordinary character

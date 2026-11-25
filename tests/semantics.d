@@ -776,7 +776,7 @@ unittest
     foreach (jitOff; [Flags.none, Flags.noJit])
     {
         bool ok;
-        auto md = MatchData.create(ok, 1); // room for group 0 only
+        auto md = MatchData.create(1, ok); // room for group 0 only
         assert(ok && md.valid && md.groupCount == 0);
         // more regexes than the old cache had slots, with 0..24 groups each
         foreach (round; 0 .. 2)
@@ -862,6 +862,7 @@ unittest
     {
         ++n;
         assert(md.match(a, "zz a"w) == MatchStatus.match); // the same regex: the range goes on
+        assert(r.front == Capture(3, 4, true), "the groups are those of the last call, not of the range's match");
     }
     assert(n == 4 && r.status == MatchStatus.noMatch);
 
@@ -924,7 +925,7 @@ unittest
         auto b = Regex.compile(`(x)(y)(z)`w, Flags.utf | Flags.noJit, e);
         assert(a.valid && b.valid);
         bool ok;
-        auto md = MatchData.create(ok, 1);
+        auto md = MatchData.create(1, ok);
         assert(ok);
         wchar[3] bad = ['a', 0xD800, 'b'];
         foreach (round; 0 .. 3)
@@ -941,4 +942,36 @@ unittest
     const before = GC.stats().usedSize;
     body();
     assert(GC.stats().usedSize == before);
+}
+
+@("one MatchData alternating regexes with different checks: noUtfCheck, matchInvalidUtf, plain, look-behind")
+unittest
+{
+    immutable wchar high = 0xD800;
+    immutable text = "a"w ~ high ~ "b"w;
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        auto plain = mk(`^a.b$`w, Flags.utf | jitOff);
+        auto unchecked = mk(`^a.b$`w, Flags.utf | Flags.noUtfCheck | jitOff);
+        auto invalid = mk(`^a.b$`w, Flags.utf | Flags.matchInvalidUtf | jitOff);
+        auto lookback = mk(`(?<=.)b`w, Flags.utf | jitOff);
+        bool ok;
+        auto md = MatchData.create(ok);
+        assert(ok);
+        foreach (round; 0 .. 3)
+        {
+            assert(md.match(plain, text) == MatchStatus.badUtf);
+            assert(md.matchLossy(plain, text) == MatchStatus.match && md.group(0) == Capture(0, 3, true));
+            // validated although the regex says noUtfCheck, because the text has a surrogate
+            assert(md.matchLossy(unchecked, text) == MatchStatus.match && md.group(0) == Capture(0, 3, true));
+            assert(md.match(invalid, text) == MatchStatus.noMatch, "an invalid unit matches nothing");
+            assert(md.matchLossy(invalid, text) == MatchStatus.noMatch);
+            // the look-behind from offset 2 reads the lone surrogate: it is repaired and `.` takes it
+            assert(md.matchLossy(lookback, text, 2) == MatchStatus.match && md.group(0) == Capture(2, 3, true));
+            assert(md.match(plain, "a-b"w) == MatchStatus.match);
+            // a plain text goes through the unchecked path whatever regex came before
+            assert(md.matchLossy(unchecked, "a-b"w) == MatchStatus.match);
+            assert(md.match(plain, text) == MatchStatus.badUtf, "no NO_UTF_CHECK left over from the previous regex");
+        }
+    }
 }

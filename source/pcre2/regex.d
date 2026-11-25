@@ -272,13 +272,20 @@ struct Regex
 /// Creating it is the expensive part of matching, so keep one per thread and reuse it.
 ///
 /// Two ways to use it:
-/// * unbound: `MatchData.create(ok)` (any number of capture groups to start with); give the `Regex` to each
+/// * unbound: `MatchData.create(ok)` (or `create(groups, ok)`); give the `Regex` to each
 ///   call: `md.match(re, text)`. One `MatchData` serves every `Regex` of the thread: before a call it takes
 ///   the limits of `re` and grows its ovector if `re` has more groups.
 /// * bound to one `Regex`: `MatchData.createFromPattern(re, ok)`; then `md.match(text)`. It keeps `re` alive.
 ///
 /// The results (`group`, `groupCount`) are those of the last call. A `Regex` given to an unbound `MatchData`
-/// must stay alive while its results or a range over it are used; it need not live between calls.
+/// must stay alive while a range over it is used; it need not live between calls (the `MatchData` keeps no
+/// reference). The calls without a `Regex` (`match(text)`, `matches(text)`, `matchLossy(text)`, ...) need a
+/// scratch made by `createFromPattern`: on an unbound one they return `MatchStatus.error` (`errorCode ==
+/// PCRE2_ERROR_NULL`), although `valid` is true (it only says that the scratch has storage).
+///
+/// The ovector only grows: a scratch that met a regex with many groups keeps that size (16 bytes per group, at most
+/// about 1 MB) for its whole life. The groups belong to the last call: a range's `front` shows the current match
+/// only until the same `MatchData` is used for another match.
 struct MatchData
 {
     private
@@ -307,9 +314,15 @@ struct MatchData
 
     @disable this(this);
 
-    /// Creates an unbound scratch whose ovector holds `ovectorGroups` groups (group 0 included); it grows by itself
-    /// when a `Regex` with more groups is used. `ok` is false on out-of-memory.
-    static MatchData create(out bool ok, uint ovectorGroups = 16) nothrow @nogc @trusted
+    /// Creates an unbound scratch with room for 16 groups (the ovector grows by itself when a `Regex` with more
+    /// groups is used). `ok` is false on out-of-memory. As in every `create`, `ok` comes last.
+    static MatchData create(out bool ok) nothrow @nogc @trusted
+    {
+        return create(16, ok);
+    }
+
+    /// Creates an unbound scratch whose ovector holds `ovectorGroups` groups (group 0 included).
+    static MatchData create(uint ovectorGroups, out bool ok) nothrow @nogc @trusted
     {
         MatchData m;
         ok = false;
@@ -333,7 +346,7 @@ struct MatchData
         if (!re.valid) return m;
         auto pl = cast(Payload*) re.payload;
         bool made;
-        m = create(made, pl.captureCount + 1);
+        m = create(pl.captureCount + 1, made);
         if (!made) return m;
         if (m.usePayload(pl) != 0) { m.release(); return m; }
         retainPayload(pl);
