@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 (unreleased)
+
+- `MatchData` that is not tied to a `Regex`: `MatchData.create(ok, ovectorGroups = 16)`, then
+  `match(re, text)`, `matches(re, text)`, `matchLossy(re, text)`, `matchesLossy(re, text)`. One per thread is enough for any
+  number of regexes: the limits of `re` are applied per call, the ovector grows when `re` has more groups, the JIT stack
+  is made at the first JIT pattern. A range ends with `error` if another regex is used meanwhile. The old calls
+  (`createFromPattern`, `match(text)`, ...) are unchanged. `MatchData.valid` now means "has storage".
+
 ## 0.1.2 (2026-11-25)
 
 - `matchLossy` / `matchesLossy`: a text without any surrogate unit is matched without the UTF check (through

@@ -3,7 +3,7 @@
 | Type | Owns | Copy | Destroy |
 |---|---|---|---|
 | `Regex` | compiled `pcre2_code` (+ JIT code) in a malloc'd block | atomic refcount++ | refcount--, free at 0 |
-| `MatchData` | `pcre2_match_data`, match context, JIT stack, a malloc'd repair buffer for `matchLossy`/`matchesLossy`; one reference on its `Regex` | not copyable | frees scratch, refcount-- |
+| `MatchData` | `pcre2_match_data`, match context, JIT stack, a malloc'd repair buffer for `matchLossy`/`matchesLossy`; one reference on its `Regex` only if made by `createFromPattern` (an unbound one, from `create`, keeps none) | not copyable | frees scratch, refcount-- |
 | `Matches` (range) | nothing; points to a `MatchData` (and, from `matchesLossy`, into its repair buffer) | plain copy | nothing |
 
 - Nothing uses the GC: all of the API is `@nogc nothrow`. Compile errors and match failures are values

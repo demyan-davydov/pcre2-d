@@ -767,3 +767,178 @@ unittest
             assert(r3.empty && r3.status == MatchStatus.noMatch);
         }
 }
+
+@("an unbound MatchData serves any number of regexes, growing its ovector")
+unittest
+{
+    import std.conv : to;
+
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        bool ok;
+        auto md = MatchData.create(ok, 1); // room for group 0 only
+        assert(ok && md.valid && md.groupCount == 0);
+        // more regexes than the old cache had slots, with 0..24 groups each
+        foreach (round; 0 .. 2)
+            foreach (n; 0 .. 25)
+            {
+                wstring pat;
+                foreach (g; 0 .. n)
+                    pat ~= "(x" ~ g.to!wstring ~ ")"w;
+                auto re = mk(pat ~ "end"w, Flags.utf | jitOff);
+                wstring text = "a "w;
+                foreach (g; 0 .. n)
+                    text ~= "x"w ~ g.to!wstring;
+                text ~= "end"w;
+                assert(md.match(re, text) == MatchStatus.match);
+                assert(md.groupCount == n + 1);
+                assert(md.group(0) == Capture(2, text.length, true));
+                if (n > 0)
+                {
+                    assert(md.group(1) == Capture(2, 4, true));
+                    assert(md.group(n).participated && md.group(n).end == text.length - 3);
+                }
+            }
+    }
+}
+
+@("an unbound MatchData applies the limits of each regex, and a JIT stack only when one is needed")
+unittest
+{
+    wchar[40] bad = 'a';
+    bad[39] = 'b';
+    CompileError e;
+    auto tight = Regex.compile(`(a+)+$`w, Flags.utf, e, Limits(10_000, 10_000, 20_000_000));
+    auto loose = mk(`a+b`w, Flags.utf);
+    auto interp = mk(`a+b`w, Flags.utf | Flags.noJit);
+    bool ok;
+    auto md = MatchData.create(ok);
+    assert(ok);
+    foreach (round; 0 .. 3)
+    {
+        assert(md.match(tight, bad[]) == MatchStatus.matchLimit);
+        assert(md.match(loose, bad[]) == MatchStatus.match && md.group(0) == Capture(0, 40, true));
+        assert(md.match(interp, bad[]) == MatchStatus.match);
+        assert(md.match(tight, bad[]) == MatchStatus.matchLimit, "the limit comes back with its regex");
+    }
+}
+
+@("an unbound MatchData: matches, matchLossy and matchesLossy take the regex too")
+unittest
+{
+    immutable wchar high = 0xD800;
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        auto a = mk(`a`w, Flags.utf | jitOff);
+        auto dot = mk(`^a.b$`w, Flags.utf | jitOff);
+        bool ok;
+        auto md = MatchData.create(ok);
+        size_t[2][] all;
+        for (auto r = md.matches(a, "xaxa"w); !r.empty; r.popFront())
+            all ~= [r.front.begin, r.front.end];
+        assert(all == [[1, 2], [3, 4]]);
+
+        assert(md.matchLossy(dot, "a"w ~ high ~ "b"w) == MatchStatus.match);
+        assert(md.group(0) == Capture(0, 3, true));
+        all = null;
+        for (auto r = md.matchesLossy(a, "a"w ~ high ~ "a"w); !r.empty; r.popFront())
+            all ~= [r.front.begin, r.front.end];
+        assert(all == [[0, 1], [2, 3]]);
+        assert(md.match(dot, "a"w ~ high ~ "b"w) == MatchStatus.badUtf);
+        assert(md.getStartchar == 1);
+    }
+}
+
+@("a range ends with an error when another regex is put into its MatchData, not when the same one is")
+unittest
+{
+    auto a = mk(`a`w, Flags.utf);
+    auto b = mk(`b`w, Flags.utf);
+    bool ok;
+    auto md = MatchData.create(ok);
+    size_t n;
+    auto r = md.matches(a, "aaaa"w);
+    for (; !r.empty; r.popFront())
+    {
+        ++n;
+        assert(md.match(a, "zz a"w) == MatchStatus.match); // the same regex: the range goes on
+    }
+    assert(n == 4 && r.status == MatchStatus.noMatch);
+
+    n = 0;
+    auto r2 = md.matches(a, "aaaa"w);
+    for (; !r2.empty; r2.popFront())
+    {
+        ++n;
+        md.match(b, "b"w); // another regex: the range is stale
+    }
+    assert(n == 1 && r2.status == MatchStatus.error);
+}
+
+@("an unbound MatchData keeps no reference: the regex may die between calls, and an invalid one is an error")
+unittest
+{
+    bool ok;
+    auto md = MatchData.create(ok);
+    foreach (i; 0 .. 50) // a regex made and freed again and again, perhaps at the same address
+    {
+        auto re = mk(`(a)(b)`w, Flags.utf);
+        assert(md.match(re, "xab"w) == MatchStatus.match);
+        assert(md.group(2) == Capture(2, 3, true));
+    }
+    Regex none;
+    assert(md.match(none, "a"w) == MatchStatus.error && md.errorCode == PCRE2_ERROR_NULL);
+    assert(md.matchLossy(none, "a"w) == MatchStatus.error);
+    auto r = md.matches(none, "a"w);
+    assert(r.empty && r.status == MatchStatus.error);
+    auto r2 = md.matchesLossy(none, "a"w);
+    assert(r2.empty && r2.status == MatchStatus.error);
+
+    MatchData blank;
+    auto a = mk(`a`w, Flags.utf);
+    assert(blank.match(a, "a"w) == MatchStatus.error);
+    assert(blank.matches(a, "a"w).empty);
+}
+
+@("a MatchData made for a regex keeps working with it after being used with others")
+unittest
+{
+    auto a = mk(`(a)`w, Flags.utf);
+    auto b = mk(`(b)(b)`w, Flags.utf);
+    bool ok;
+    auto md = MatchData.createFromPattern(a, ok);
+    assert(ok && md.match("xa"w) == MatchStatus.match && md.groupCount == 2);
+    assert(md.match(b, "xbb"w) == MatchStatus.match && md.groupCount == 3);
+    assert(md.match("xa"w) == MatchStatus.match && md.groupCount == 2 && md.group(1) == Capture(1, 2, true));
+}
+
+@("the unbound API allocates nothing on the GC heap")
+unittest
+{
+    import core.memory : GC;
+
+    static void body() @nogc nothrow
+    {
+        CompileError e;
+        auto a = Regex.compile(`a.b`w, Flags.utf, e);
+        auto b = Regex.compile(`(x)(y)(z)`w, Flags.utf | Flags.noJit, e);
+        assert(a.valid && b.valid);
+        bool ok;
+        auto md = MatchData.create(ok, 1);
+        assert(ok);
+        wchar[3] bad = ['a', 0xD800, 'b'];
+        foreach (round; 0 .. 3)
+        {
+            assert(md.match(b, "xyz"w) == MatchStatus.match && md.groupCount == 4);
+            assert(md.matchLossy(a, bad[]) == MatchStatus.match);
+            size_t n;
+            for (auto r = md.matchesLossy(a, bad[]); !r.empty; r.popFront())
+                ++n;
+            assert(n == 1);
+        }
+    }
+
+    const before = GC.stats().usedSize;
+    body();
+    assert(GC.stats().usedSize == before);
+}

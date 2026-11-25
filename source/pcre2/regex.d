@@ -268,15 +268,35 @@ struct Regex
     private inout(Payload)* payload() inout pure nothrow @nogc @safe { return p; }
 }
 
-/// Per-thread matching scratch for one `Regex`. Create one per (thread, regex) and reuse it.
+/// Matching scratch of one thread: match data (the ovector), match context and, for JIT patterns, a JIT stack.
+/// Creating it is the expensive part of matching, so keep one per thread and reuse it.
+///
+/// Two ways to use it:
+/// * unbound: `MatchData.create(ok)` (any number of capture groups to start with); give the `Regex` to each
+///   call: `md.match(re, text)`. One `MatchData` serves every `Regex` of the thread: before a call it takes
+///   the limits of `re` and grows its ovector if `re` has more groups.
+/// * bound to one `Regex`: `MatchData.createFromPattern(re, ok)`; then `md.match(text)`. It keeps `re` alive.
+///
+/// The results (`group`, `groupCount`) are those of the last call. A `Regex` given to an unbound `MatchData`
+/// must stay alive while its results or a range over it are used; it need not live between calls.
 struct MatchData
 {
     private
     {
-        Payload* pl;
+        Payload* bound; // owned reference of the Regex this MatchData was created for (null: unbound)
         pcre2_match_data_16* md;
         pcre2_match_context_16* mc;
-        pcre2_jit_stack_16* stack;
+        pcre2_jit_stack_16* stack; // made when a JIT-compiled pattern is first used
+        uint ovCap; // groups (pairs) that `md` can hold
+        // what is known of the regex of the last call (copied, so nothing here points into a Regex)
+        size_t curId; // 0: none yet
+        const(pcre2_code_16)* curCode;
+        uint curOptions;
+        bool curNoUtfCheck;
+        bool curJit;
+        uint curCaptures;
+        uint curMaxLookbehind;
+        size_t useGen; // bumped when the regex or the ovector changes: a range made before it is stale
         int rc; // last pcre2_match result (> 0: matched, count of groups incl. 0)
         int err; // last error code (< 0), 0 if none
         size_t* ov;
@@ -287,7 +307,24 @@ struct MatchData
 
     @disable this(this);
 
-    /// Creates scratch for `re` (keeps `re` alive). Returns false in `ok` on out-of-memory.
+    /// Creates an unbound scratch whose ovector holds `ovectorGroups` groups (group 0 included); it grows by itself
+    /// when a `Regex` with more groups is used. `ok` is false on out-of-memory.
+    static MatchData create(out bool ok, uint ovectorGroups = 16) nothrow @nogc @trusted
+    {
+        MatchData m;
+        ok = false;
+        if (ovectorGroups == 0)
+            ovectorGroups = 1;
+        m.md = pcre2_match_data_create_16(ovectorGroups, null);
+        m.mc = pcre2_match_context_create_16(null);
+        if (m.md is null || m.mc is null) { m.release(); return m; }
+        m.ovCap = ovectorGroups;
+        m.ov = pcre2_get_ovector_pointer_16(m.md);
+        ok = true;
+        return m;
+    }
+
+    /// Creates scratch bound to `re` (keeps `re` alive). Returns false in `ok` on out-of-memory.
     /// (`pcre2_match_data_create_from_pattern`, plus the match context and the JIT stack)
     static MatchData createFromPattern(ref const Regex re, out bool ok) nothrow @nogc @trusted
     {
@@ -295,27 +332,21 @@ struct MatchData
         ok = false;
         if (!re.valid) return m;
         auto pl = cast(Payload*) re.payload;
-        m.md = pcre2_match_data_create_from_pattern_16(pl.code, null);
-        m.mc = pcre2_match_context_create_16(null);
-        if (m.md is null || m.mc is null) { m.release(); return m; }
-        pcre2_set_match_limit_16(m.mc, pl.limits.match);
-        pcre2_set_depth_limit_16(m.mc, pl.limits.depth);
-        pcre2_set_heap_limit_16(m.mc, pl.limits.heap);
-        if (pl.jit)
-        {
-            m.stack = pcre2_jit_stack_create_16(32 * 1024, 1024 * 1024, null);
-            if (m.stack is null) { m.release(); return m; }
-            pcre2_jit_stack_assign_16(m.mc, null, m.stack);
-        }
-        m.ov = pcre2_get_ovector_pointer_16(m.md);
-        atomicFetchAdd(pl.refs, 1);
-        m.pl = pl;
+        bool made;
+        m = create(made, pl.captureCount + 1);
+        if (!made) return m;
+        if (m.usePayload(pl) != 0) { m.release(); return m; }
+        retainPayload(pl);
+        m.bound = pl;
         ok = true;
         return m;
     }
 
-    /// Former name of `createFromPattern`.
-    alias create = createFromPattern;
+    /// Same as `createFromPattern`.
+    static MatchData create(ref const Regex re, out bool ok) nothrow @nogc @trusted
+    {
+        return createFromPattern(re, ok);
+    }
 
     ~this() pure nothrow @nogc @trusted
     {
@@ -325,8 +356,8 @@ struct MatchData
     private static void destroyMatchData(MatchData* m) nothrow @nogc @trusted
     {
         m.release();
-        if (m.pl) releasePayload(m.pl);
-        m.pl = null;
+        if (m.bound) releasePayload(m.bound);
+        m.bound = null;
     }
 
     private void release() nothrow @nogc @trusted
@@ -335,25 +366,80 @@ struct MatchData
         if (mc) pcre2_match_context_free_16(mc);
         if (md) pcre2_match_data_free_16(md);
         if (fixBuf) free(fixBuf);
-        stack = null; mc = null; md = null; fixBuf = null; fixCap = 0;
+        stack = null; mc = null; md = null; fixBuf = null; fixCap = 0; ov = null; ovCap = 0;
     }
 
-    @property bool valid() const pure nothrow @nogc @safe { return pl !is null; }
+    /// True if the scratch exists (not a default-constructed or failed one).
+    @property bool valid() const pure nothrow @nogc @safe { return md !is null; }
 
-    /// Matches `subject` from code unit offset `start` (`pcre2_match`). Groups are then available.
-    MatchStatus match(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
+    // Makes `p` the regex of the next call: its limits go into the match context, the ovector grows if needed, the
+    // JIT stack is made for the first JIT pattern. Cheap when `p` is the regex of the last call. Returns 0 or a
+    // PCRE2 error code.
+    private int usePayload(Payload* p) nothrow @nogc @trusted
     {
-        if (pl is null)
-            return nullStatus();
-        return run(subject, start, (pl.noUtfCheck && !(pl.options & PCRE2_MATCH_INVALID_UTF)) ? PCRE2_NO_UTF_CHECK : 0);
+        if (md is null || p is null)
+            return PCRE2_ERROR_NULL;
+        if (p.id == curId)
+            return 0;
+        if (p.captureCount + 1 > ovCap)
+        {
+            auto bigger = pcre2_match_data_create_16(p.captureCount + 1, null);
+            if (bigger is null)
+                return PCRE2_ERROR_NOMEMORY;
+            pcre2_match_data_free_16(md);
+            md = bigger;
+            ovCap = p.captureCount + 1;
+            ov = pcre2_get_ovector_pointer_16(md);
+            rc = 0; // the groups of the earlier call are gone
+        }
+        if (p.jit && stack is null)
+        {
+            stack = pcre2_jit_stack_create_16(32 * 1024, 1024 * 1024, null);
+            if (stack is null)
+                return PCRE2_ERROR_NOMEMORY;
+            pcre2_jit_stack_assign_16(mc, null, stack);
+        }
+        pcre2_set_match_limit_16(mc, p.limits.match);
+        pcre2_set_depth_limit_16(mc, p.limits.depth);
+        pcre2_set_heap_limit_16(mc, p.limits.heap);
+        curId = p.id;
+        curCode = p.code;
+        curOptions = p.options;
+        curNoUtfCheck = p.noUtfCheck;
+        curJit = p.jit;
+        curCaptures = p.captureCount;
+        curMaxLookbehind = p.maxLookbehind;
+        ++useGen;
+        return 0;
     }
 
-    // an invalid (default or failed-to-create) MatchData: an error value instead of a null dereference
-    private MatchStatus nullStatus() nothrow @nogc @safe
+    // An invalid MatchData or Regex (or a failed `usePayload`): an error value instead of a null dereference
+    private MatchStatus failedUse(int code) nothrow @nogc @safe
     {
         rc = 0;
-        err = PCRE2_ERROR_NULL;
+        err = code;
         return MatchStatus.error;
+    }
+
+    /// Matches `subject` from code unit offset `start` (`pcre2_match`) with the `Regex` this scratch was created
+    /// for. Groups are then available.
+    MatchStatus match(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
+    {
+        return matchWith(bound, subject, start);
+    }
+
+    /// Same, with the `Regex` given to the call (any `MatchData` works with any `Regex`).
+    MatchStatus match(ref const Regex re, const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
+    {
+        return matchWith(cast(Payload*) re.payload, subject, start);
+    }
+
+    private MatchStatus matchWith(Payload* p, const(wchar)[] subject, size_t start) nothrow @nogc @trusted
+    {
+        const used = usePayload(p);
+        if (used != 0)
+            return failedUse(used);
+        return run(subject, start, (curNoUtfCheck && !(curOptions & PCRE2_MATCH_INVALID_UTF)) ? PCRE2_NO_UTF_CHECK : 0);
     }
 
     /// Former name of `match`.
@@ -366,7 +452,7 @@ struct MatchData
         // A start past the end, and (with the UTF check skipped, when PCRE2 does not look at `start`) one inside a
         // surrogate pair, are rejected here in O(1), as the checking path would.
         if (start > subject.length
-            || ((opts & PCRE2_NO_UTF_CHECK) && (pl.options & PCRE2_UTF) && start > 0 && start < subject.length
+            || ((opts & PCRE2_NO_UTF_CHECK) && (curOptions & PCRE2_UTF) && start > 0 && start < subject.length
                 && subject[start] >= 0xDC00 && subject[start] <= 0xDFFF
                 && subject[start - 1] >= 0xD800 && subject[start - 1] <= 0xDBFF))
         {
@@ -377,11 +463,11 @@ struct MatchData
         // pcre2_jit_match does no UTF validation, so it is only used when the check is skipped;
         // otherwise pcre2_match (which still runs the JIT code, after validating the subject).
         // (with PCRE2_MATCH_INVALID_UTF the subject is scanned inside the match: always pcre2_match)
-        rc = (pl.jit && (opts & PCRE2_NO_UTF_CHECK) && !(pl.options & PCRE2_MATCH_INVALID_UTF))
-            ? pcre2_jit_match_16(pl.code, s, subject.length, start, opts, md, mc)
-            : pcre2_match_16(pl.code, s, subject.length, start, opts, md, mc);
+        rc = (curJit && (opts & PCRE2_NO_UTF_CHECK) && !(curOptions & PCRE2_MATCH_INVALID_UTF))
+            ? pcre2_jit_match_16(curCode, s, subject.length, start, opts, md, mc)
+            : pcre2_match_16(curCode, s, subject.length, start, opts, md, mc);
         err = 0;
-        if (rc > 0 || rc == 0) // rc == 0: ovector too small, cannot happen (created from pattern)
+        if (rc > 0 || rc == 0) // rc == 0: ovector too small, cannot happen (it holds the groups of the regex)
             return MatchStatus.match;
         err = rc;
         switch (rc)
@@ -408,13 +494,13 @@ struct MatchData
     /// Same as `getStartchar`, under a name that says what it is used for.
     alias badUtfOffset = getStartchar;
 
-    /// Number of groups (including 0) the last match could report: `regex.captureCount + 1`.
-    @property uint groupCount() const pure nothrow @nogc @trusted { return pl ? pl.captureCount + 1 : 0; }
+    /// Number of groups (including 0) the last call's regex has: `regex.captureCount + 1` (0 before the first call).
+    @property uint groupCount() const pure nothrow @nogc @safe { return curId ? curCaptures + 1 : 0; }
 
     /// Group `i` of the last successful match. Out-of-range or non-participating: `participated == false`.
     Capture group(uint i) const pure nothrow @nogc @trusted
     {
-        if (rc <= 0 || i > pl.captureCount || i >= cast(uint) rc)
+        if (rc <= 0 || i > curCaptures || i >= cast(uint) rc)
             return Capture(0, 0, false);
         const b = ov[2 * i], e = ov[2 * i + 1];
         if (b == PCRE2_UNSET)
@@ -439,8 +525,20 @@ struct MatchData
     /// if the regex was compiled with `noUtfCheck`, unlike `match`.
     MatchStatus matchLossy(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
     {
-        if (pl is null)
-            return nullStatus();
+        return matchLossyWith(bound, subject, start);
+    }
+
+    /// Same, with the `Regex` given to the call.
+    MatchStatus matchLossy(ref const Regex re, const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
+    {
+        return matchLossyWith(cast(Payload*) re.payload, subject, start);
+    }
+
+    private MatchStatus matchLossyWith(Payload* p, const(wchar)[] subject, size_t start) nothrow @nogc @trusted
+    {
+        const used = usePayload(p);
+        if (used != 0)
+            return failedUse(used);
         // A text without any surrogate unit is valid UTF-16, so the check of PCRE2 (about half of the cost of a
         // short match) is skipped; with a surrogate, paired or lone, the text is validated here even for a regex
         // compiled with `noUtfCheck`: that is the point of the function.
@@ -453,7 +551,7 @@ struct MatchData
             err = PCRE2_ERROR_NOMEMORY;
             return MatchStatus.error;
         }
-        return match(fixed, start);
+        return matchWith(p, fixed, start);
     }
 
     /// `matches` that reads lone surrogates as U+FFFD, like `matchLossy`. The subject given to the range is
@@ -461,6 +559,20 @@ struct MatchData
     /// range at once: the range becomes empty with `status == MatchStatus.error` (never a stale read).
     Matches matchesLossy(const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
     {
+        return matchesLossyWith(bound, subject, start);
+    }
+
+    /// Same, with the `Regex` given to the call (it must stay alive while the range is used).
+    Matches matchesLossy(ref const Regex re, const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
+    {
+        return matchesLossyWith(cast(Payload*) re.payload, subject, start);
+    }
+
+    private Matches matchesLossyWith(Payload* p, const(wchar)[] subject, size_t start) return nothrow @nogc @trusted
+    {
+        const used = usePayload(p);
+        if (used != 0)
+            return failedRange(used);
         auto r = matchesChecked(subject, start);
         if (r.status != MatchStatus.badUtf)
             return r;
@@ -471,12 +583,12 @@ struct MatchData
             r.status = MatchStatus.error;
             return r;
         }
-        auto fr = matches(fixed, start);
+        auto fr = matchesWith(p, fixed, start);
         fr.gen = fixGen;
         return fr;
     }
 
-    // The part of `subject` a match from `start` can read (`pl` is null for an invalid MatchData: only the margin): PCRE2 looks back at most `maxLookbehind` characters
+    // The part of `subject` a match from `start` can read: PCRE2 looks back at most `curMaxLookbehind` characters
     // (two code units each at most) from `start`, and what is before that is never read nor validated. Two more
     // units are scanned as a margin (a multiline `^` may look at the previous character, which the look-behind
     // count of PCRE2 is not documented to include). This holds also for `start >= subject.length`, where a match
@@ -484,7 +596,7 @@ struct MatchData
     private const(wchar)[] readableTail(const(wchar)[] subject, size_t start) const pure nothrow @nogc @trusted
     {
         const end = start < subject.length ? start : subject.length;
-        const back = (pl ? cast(size_t) pl.maxLookbehind * 2 : 0) + 2;
+        const back = cast(size_t) curMaxLookbehind * 2 + 2;
         return subject[(end > back ? end - back : 0) .. $];
     }
 
@@ -497,6 +609,15 @@ struct MatchData
         else
             r.skipCheck = true; // no surrogate unit: valid UTF-16, no need to validate
         r.advance();
+        return r;
+    }
+
+    // An empty range that says why
+    private Matches failedRange(int code) return nothrow @nogc @trusted
+    {
+        auto r = Matches(&this, null, 0);
+        r.done = true;
+        r.status = failedUse(code);
         return r;
     }
 
@@ -536,10 +657,25 @@ struct MatchData
     /// If the subject is not valid UTF-16 (and `Flags.matchInvalidUtf` / `noUtfCheck` are not set),
     /// the range is returned empty with `status == MatchStatus.badUtf` before any element was
     /// produced (`getStartchar` says where); a caller may then repair the text and call again. The
-    /// subject is validated once; later steps skip the check (not with `Flags.matchInvalidUtf`, see there). A limit stop (`matchLimit`, ...) is
-    /// reported the same way: an empty range or a range that ends early, with that `status`.
+    /// subject is validated once; later steps skip the check (not with `Flags.matchInvalidUtf`, see there). A limit
+    /// stop (`matchLimit`, ...) is reported the same way: an empty range or a range that ends early, with that
+    /// `status`. Using another `Regex` with this `MatchData` while a range is open ends the range with `error`.
     Matches matches(const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
     {
+        return matchesWith(bound, subject, start);
+    }
+
+    /// Same, with the `Regex` given to the call (it must stay alive while the range is used).
+    Matches matches(ref const Regex re, const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
+    {
+        return matchesWith(cast(Payload*) re.payload, subject, start);
+    }
+
+    private Matches matchesWith(Payload* p, const(wchar)[] subject, size_t start) return nothrow @nogc @trusted
+    {
+        const used = usePayload(p);
+        if (used != 0)
+            return failedRange(used);
         auto r = Matches(&this, subject, start);
         r.advance();
         return r;
@@ -568,17 +704,14 @@ struct Matches
     private bool forceCheck; // validate the first subject even if the regex has noUtfCheck
     private bool skipCheck; // the subject is known to be valid: no check, even for the first step
     private size_t gen; // not 0: the subject is the repair buffer of the MatchData, valid while its fixGen is this
+    private size_t useGen; // the MatchData's useGen when the range was made: another regex makes it stale
     /// `noMatch` after normal exhaustion; otherwise the status that stopped the iteration.
     MatchStatus status = MatchStatus.noMatch;
 
-    private this(MatchData* m, const(wchar)[] subject, size_t pos) nothrow @nogc
+    private this(MatchData* m, const(wchar)[] subject, size_t pos) nothrow @nogc @safe
     {
         this.m = m; this.subject = subject; this.pos = pos;
-        if (m.pl is null) // invalid MatchData: an empty range with an error status
-        {
-            done = true;
-            status = m.nullStatus();
-        }
+        this.useGen = m.useGen;
     }
 
     @property bool empty() const pure nothrow @nogc @safe { return done; }
@@ -589,16 +722,17 @@ struct Matches
     {
         if (done)
             return;
-        if (gen && m.fixGen != gen) // the repair buffer was rewritten by another Lossy call
+        if ((gen && m.fixGen != gen) // the repair buffer was rewritten by another Lossy call
+            || m.useGen != useGen) // another Regex (or a bigger ovector) was put into the MatchData
         {
             done = true;
             status = MatchStatus.error;
             return;
         }
         // After the first successful call the subject is known valid: skip re-validation (avoids O(n^2)).
-        const invalidOk = (m.pl.options & PCRE2_MATCH_INVALID_UTF) != 0;
+        const invalidOk = (m.curOptions & PCRE2_MATCH_INVALID_UTF) != 0;
         uint extra = 0;
-        if (!invalidOk && (started || skipCheck || (m.pl.noUtfCheck && !forceCheck)))
+        if (!invalidOk && (started || skipCheck || (m.curNoUtfCheck && !forceCheck)))
             extra = PCRE2_NO_UTF_CHECK;
         if (emptyPrev)
             extra |= PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;
@@ -607,7 +741,7 @@ struct Matches
         {
             // no non-empty match at this position: step one character and search normally
             if (pos >= subject.length) { done = true; status = MatchStatus.noMatch; return; }
-            pos += (m.pl.options & PCRE2_UTF) && subject[pos] >= 0xD800 && subject[pos] < 0xDC00
+            pos += (m.curOptions & PCRE2_UTF) && subject[pos] >= 0xD800 && subject[pos] < 0xDC00
                 && pos + 1 < subject.length && subject[pos + 1] >= 0xDC00 && subject[pos + 1] < 0xE000 ? 2 : 1;
             emptyPrev = false;
             st = m.run(subject, pos, invalidOk ? 0 : PCRE2_NO_UTF_CHECK);

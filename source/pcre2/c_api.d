@@ -62,6 +62,7 @@ int pcre2_pattern_info_16(const(pcre2_code_16)* code, uint what, void* where);
 int pcre2_config_16(uint what, void* where);
 int pcre2_get_error_message_16(int errorcode, wchar* buffer, PCRE2_SIZE bufflen);
 
+pcre2_match_data_16* pcre2_match_data_create_16(uint ovecsize, pcre2_general_context_16* gcontext);
 pcre2_match_data_16* pcre2_match_data_create_from_pattern_16(const(pcre2_code_16)* code,
     pcre2_general_context_16* gcontext);
 void pcre2_match_data_free_16(pcre2_match_data_16* md);
