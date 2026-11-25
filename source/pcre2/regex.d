@@ -23,6 +23,13 @@ enum Flags : uint
     utf = 1 << 4, /// treat pattern and subject as UTF-16 (surrogate pairs, Unicode case folding)
     noUtfCheck = 1 << 5, /// caller guarantees valid UTF-16 subjects: skip the validity check
     noJit = 1 << 6, /// do not JIT compile even if the library supports it
+    /// Unicode properties for `\d \w \s \b` and POSIX classes (PCRE2_UCP). Requires `utf`.
+    ucp = 1 << 7,
+    /// A subject with invalid UTF-16 (a lone surrogate) is matched instead of failing with
+    /// `MatchStatus.badUtf`: the invalid units simply never match a character. Requires `utf`.
+    /// Offsets stay in code units of the original subject. `noUtfCheck` is then irrelevant, and
+    /// matching always goes through `pcre2_match`.
+    matchInvalidUtf = 1 << 8,
 }
 
 /// Resource limits applied to every match; a runaway pattern ends with `MatchStatus.matchLimit` etc.
@@ -83,9 +90,12 @@ bool libraryHasJit() nothrow @nogc @trusted
     return pcre2_config_16(PCRE2_CONFIG_JIT, &v) == 0 && v == 1;
 }
 
+private shared size_t lastRegexId;
+
 private struct Payload
 {
     shared size_t refs;
+    size_t id; // unique per compiled Regex in this process, never 0
     pcre2_code_16* code;
     uint options; // compile options incl. flags (UTF etc.)
     bool noUtfCheck;
@@ -96,6 +106,27 @@ private struct Payload
     uint nameEntrySize;
     const(wchar)* nameTable;
 }
+
+// The reference counting, the C free functions and `free` are not `pure`, but a compiled `Regex` is
+// immutable and its sharing is not observable through the type system, so `this(this)` and `~this()`
+// are declared `pure` by casting these helpers to `pure` function types. This lets `pure` code
+// (constructors, `dup`) hold a `Regex` by value.
+private void retainPayload(Payload* pl) nothrow @nogc @trusted
+{
+    atomicFetchAdd(pl.refs, 1);
+}
+
+private void releasePayload(Payload* pl) nothrow @nogc @trusted
+{
+    if (atomicFetchSub(pl.refs, 1) == 1)
+    {
+        pcre2_code_free_16(pl.code);
+        free(pl);
+    }
+}
+
+private alias PurePayloadFn = void function(Payload*) pure nothrow @nogc;
+private alias PureMatchDataFn = void function(MatchData*) pure nothrow @nogc;
 
 /// Compiled pattern. Copying shares the compiled code (atomic refcount).
 struct Regex
@@ -112,6 +143,8 @@ struct Regex
         if (flags & Flags.multiline) opts |= PCRE2_MULTILINE;
         if (flags & Flags.dollarEndOnly) opts |= PCRE2_DOLLAR_ENDONLY;
         if (flags & Flags.utf) opts |= PCRE2_UTF;
+        if (flags & Flags.ucp) opts |= PCRE2_UCP;
+        if (flags & Flags.matchInvalidUtf) opts |= PCRE2_MATCH_INVALID_UTF;
         int ec;
         size_t eo;
         // a null pointer with length 0 is invalid for PCRE2; use an empty literal
@@ -131,6 +164,7 @@ struct Regex
         }
         *pl = Payload.init;
         pl.refs = 1;
+        pl.id = atomicFetchAdd(lastRegexId, 1) + 1;
         pl.code = code;
         pl.options = opts;
         pl.noUtfCheck = (flags & Flags.noUtfCheck) != 0;
@@ -146,20 +180,20 @@ struct Regex
         return r;
     }
 
-    this(this) nothrow @nogc @trusted
+    this(this) pure nothrow @nogc @trusted
     {
-        if (p) atomicFetchAdd(p.refs, 1);
+        if (p) (cast(PurePayloadFn) &retainPayload)(p);
     }
 
-    ~this() nothrow @nogc @trusted
+    ~this() pure nothrow @nogc @trusted
     {
-        if (p && atomicFetchSub(p.refs, 1) == 1)
-        {
-            pcre2_code_free_16(p.code);
-            free(p);
-        }
+        if (p) (cast(PurePayloadFn) &releasePayload)(p);
         p = null;
     }
+
+    /// Process-unique number of the compiled pattern (copies share it; never 0, 0 if `!valid`).
+    /// Handy as a key for a per-thread cache of `MatchData`.
+    @property size_t id() const pure nothrow @nogc @safe { return p ? p.id : 0; }
 
     @property bool valid() const pure nothrow @nogc @safe { return p !is null; }
     /// True if matching runs JIT compiled code (false: interpreter).
@@ -243,15 +277,16 @@ struct MatchData
         return m;
     }
 
-    ~this() nothrow @nogc @trusted
+    ~this() pure nothrow @nogc @trusted
     {
-        release();
-        if (pl && atomicFetchSub(pl.refs, 1) == 1)
-        {
-            pcre2_code_free_16(pl.code);
-            free(pl);
-        }
-        pl = null;
+        (cast(PureMatchDataFn) &destroyMatchData)(&this);
+    }
+
+    private static void destroyMatchData(MatchData* m) nothrow @nogc @trusted
+    {
+        m.release();
+        if (m.pl) releasePayload(m.pl);
+        m.pl = null;
     }
 
     private void release() nothrow @nogc @trusted
@@ -267,7 +302,7 @@ struct MatchData
     /// Searches `subject` from code unit offset `start`. `extraOptions` is for internal use.
     MatchStatus search(const(wchar)[] subject, size_t start = 0) nothrow @nogc @trusted
     {
-        return run(subject, start, pl.noUtfCheck ? PCRE2_NO_UTF_CHECK : 0);
+        return run(subject, start, (pl.noUtfCheck && !(pl.options & PCRE2_MATCH_INVALID_UTF)) ? PCRE2_NO_UTF_CHECK : 0);
     }
 
     private MatchStatus run(const(wchar)[] subject, size_t start, uint opts) nothrow @nogc @trusted
@@ -276,7 +311,8 @@ struct MatchData
         auto s = subject.length ? subject.ptr : nul.ptr;
         // pcre2_jit_match does no UTF validation, so it is only used when the check is skipped;
         // otherwise pcre2_match (which still runs the JIT code, after validating the subject).
-        rc = (pl.jit && (opts & PCRE2_NO_UTF_CHECK))
+        // (with PCRE2_MATCH_INVALID_UTF the subject is scanned inside the match: always pcre2_match)
+        rc = (pl.jit && (opts & PCRE2_NO_UTF_CHECK) && !(pl.options & PCRE2_MATCH_INVALID_UTF))
             ? pcre2_jit_match_16(pl.code, s, subject.length, start, opts, md, mc)
             : pcre2_match_16(pl.code, s, subject.length, start, opts, md, mc);
         err = 0;
@@ -326,6 +362,13 @@ struct MatchData
     /// Lazy range over all non-overlapping matches in `subject` (front = whole match, `Capture`).
     /// The `MatchData` holds the groups of the current match. Check `status` after iteration:
     /// `noMatch` is normal completion, anything else is an error that ended the iteration.
+    ///
+    /// The first search runs inside this call, so the range is already positioned on the first match.
+    /// If the subject is not valid UTF-16 (and `Flags.matchInvalidUtf` / `noUtfCheck` are not set),
+    /// the range is returned empty with `status == MatchStatus.badUtf` before any element was
+    /// produced (`badUtfOffset` says where); a caller may then repair the text and call again. The
+    /// subject is validated once; later steps skip the check. A limit stop (`matchLimit`, ...) is
+    /// reported the same way: an empty range or a range that ends early, with that `status`.
     Matches matches(const(wchar)[] subject, size_t start = 0) return nothrow @nogc @trusted
     {
         auto r = Matches(&this, subject, start);
@@ -358,7 +401,8 @@ struct Matches
     private void advance(bool) nothrow @nogc @trusted
     {
         // After the first successful call the subject is known valid: skip re-validation (avoids O(n^2)).
-        uint extra = started ? PCRE2_NO_UTF_CHECK : (m.pl.noUtfCheck ? PCRE2_NO_UTF_CHECK : 0);
+        const invalidOk = (m.pl.options & PCRE2_MATCH_INVALID_UTF) != 0;
+        uint extra = (started && !invalidOk) ? PCRE2_NO_UTF_CHECK : (m.pl.noUtfCheck && !invalidOk ? PCRE2_NO_UTF_CHECK : 0);
         if (emptyPrev)
             extra |= PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;
         auto st = m.run(subject, pos, extra);
@@ -367,9 +411,9 @@ struct Matches
             // no non-empty match at this position: step one character and search normally
             if (pos >= subject.length) { done = true; status = MatchStatus.noMatch; return; }
             pos += (m.pl.options & PCRE2_UTF) && subject[pos] >= 0xD800 && subject[pos] < 0xDC00
-                && pos + 1 < subject.length ? 2 : 1;
+                && pos + 1 < subject.length && subject[pos + 1] >= 0xDC00 && subject[pos + 1] < 0xE000 ? 2 : 1;
             emptyPrev = false;
-            st = m.run(subject, pos, PCRE2_NO_UTF_CHECK);
+            st = m.run(subject, pos, invalidOk ? 0 : PCRE2_NO_UTF_CHECK);
         }
         if (st != MatchStatus.match) { done = true; status = st; return; }
         started = true;

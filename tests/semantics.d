@@ -287,3 +287,77 @@ unittest // the whole API is @nogc nothrow and allocates nothing on the GC heap 
     body();
     assert(GC.stats().usedSize == before);
 }
+
+unittest // Flags.ucp: Unicode \d \w \s \b
+{
+    assert(find(`\w+`w, "éé abc"w, Flags.utf | Flags.ucp) == [0, 2]);
+    assert(find(`\w+`w, "жук"w, Flags.utf | Flags.ucp) == [0, 3]);
+    assert(find(`\d`w, "x٣"w, Flags.utf | Flags.ucp) == [1, 2]);
+    assert(find(`a\b`w, "aé"w, Flags.utf | Flags.ucp) == [-1, -1]); // é is now a word character
+    assert(find(`ж`w, "Ж"w, Flags.utf | Flags.ucp | Flags.caseless) == [0, 1]);
+}
+
+unittest // Flags.matchInvalidUtf: a lone surrogate is not an error, offsets are the original ones
+{
+    immutable wchar high = 0xD800, low = 0xDC00;
+    immutable subj = "ok "w ~ high ~ " ok "w ~ low ~ " end"w;
+    foreach (jitOff; [Flags.none, Flags.noJit])
+    {
+        // default: badUtf, before the first element
+        auto plain = mk(`ok`w, Flags.utf | jitOff);
+        auto md0 = scratch(plain);
+        auto r0 = md0.matches(subj);
+        assert(r0.empty && r0.status == MatchStatus.badUtf);
+        assert(md0.badUtfOffset == 3);
+
+        auto re = mk(`ok`w, Flags.utf | Flags.matchInvalidUtf | jitOff);
+        auto md = scratch(re);
+        size_t[2][] all;
+        auto r = md.matches(subj);
+        for (; !r.empty; r.popFront())
+            all ~= [r.front.begin, r.front.end];
+        assert(r.status == MatchStatus.noMatch);
+        assert(all == [[0, 2], [5, 7]]);
+        assert(md.search(subj) == MatchStatus.match);
+
+        auto dots = mk(`.`w, Flags.utf | Flags.matchInvalidUtf | jitOff);
+        auto md2 = scratch(dots);
+        size_t n;
+        for (auto q = md2.matches("a"w ~ high ~ "b"w); !q.empty; q.popFront())
+            ++n;
+        assert(n >= 2); // a and b at least; the offsets stay in the original text
+    }
+}
+
+unittest // Regex.id is unique per compile and shared by copies
+{
+    auto a = mk(`a`w, Flags.utf);
+    auto b = mk(`a`w, Flags.utf);
+    auto a2 = a;
+    assert(a.id != 0 && a.id != b.id && a.id == a2.id);
+    assert(Regex.init.id == 0);
+}
+
+unittest // Regex and MatchData can be held by value in pure code
+{
+    static struct Holder
+    {
+        Regex re;
+    }
+
+    static Holder make(Holder h) pure nothrow @nogc @safe
+    {
+        Holder copy = h; // postblit
+        return copy; // destructors of temporaries
+    }
+
+    static void useMatchData(MatchData m) pure nothrow @nogc @safe
+    {
+    }
+
+    auto h = Holder(mk(`a`w, Flags.utf));
+    auto h2 = make(h);
+    assert(h2.re.valid && h2.re.id == h.re.id);
+    bool ok;
+    useMatchData(MatchData.create(h.re, ok));
+}

@@ -34,7 +34,7 @@ for (auto m = md.matches("a=1 B=22"w); !m.empty; m.popFront())
 // MatchStatus: match, noMatch, matchLimit, depthLimit, heapLimit, jitStackLimit, badUtf, error
 ```
 
-- `Flags`: `caseless dotAll multiline dollarEndOnly utf noUtfCheck noJit`. `Limits{match, depth, heap}` bound the work;
+- `Flags`: `caseless dotAll multiline dollarEndOnly utf noUtfCheck noJit ucp matchInvalidUtf`. `Limits{match, depth, heap}` bound the work;
   a catastrophic pattern returns `MatchStatus.matchLimit`, never hangs.
 - A group that did not participate has `participated == false`; an empty one has `participated == true`, `begin == end`.
 - Semantics (pinned by `tests/semantics.d`): `\d \w \s \b` are ASCII (no UCP); `caseless` uses Unicode simple case folding
@@ -43,7 +43,23 @@ for (auto m = md.matches("a=1 B=22"w); !m.empty; m.popFront())
   unless `noUtfCheck` is set (then the caller guarantees valid UTF-16).
 - With JIT, matching uses `pcre2_match` (validates UTF, runs JIT code) normally and `pcre2_jit_match` when UTF checking is
   skipped (`noUtfCheck`, and for follow-up matches inside `matches`, which validates only once to stay O(n)).
+- `Flags.ucp` makes `\d \w \s \b` Unicode-aware (needs `utf`). `Flags.matchInvalidUtf` (PCRE2_MATCH_INVALID_UTF) matches
+  subjects with lone surrogates instead of returning `badUtf`; offsets stay in units of the original subject, and
+  matching then always goes through `pcre2_match` (no `pcre2_jit_match`).
+- `MatchData.matches` runs the first search inside the call: for an invalid subject the range comes back **empty**
+  with `status == MatchStatus.badUtf` before any element; the same holds for limit stops (`status` tells which).
+- `Regex.id` is a process-unique number of a compiled pattern (copies share it), usable as a key for a per-thread
+  cache of `MatchData`. `Regex`'s postblit and destructor, and `MatchData`'s destructor, are `pure nothrow @nogc`,
+  so `pure` code can hold them by value.
 - Ownership and threading: [OWNERSHIP.md](OWNERSHIP.md). `Regex` is shared and immutable; `MatchData` is per thread.
+
+## Limits and runaway patterns
+
+`Limits.match` counts backtracking steps in both the interpreter and the JIT (the JIT counts differently, so the same
+pattern may stop at slightly different points). `Limits.depth` and `Limits.heap` apply to the interpreter only. When a
+limit is hit the match call returns `matchLimit` / `depthLimit` / `heapLimit` (`jitStackLimit` if the JIT stack of
+1 MiB runs out) as a `MatchStatus` value, with no exception and no hang; there is no partial result. `(a+)+b` on 5000
+`a` ends this way (pinned in `tests/semantics.d`). For `Matches` the status is in `Matches.status` once the range ends.
 
 ## Build options (chosen by the dependent at build time)
 
