@@ -100,4 +100,4 @@ macOS hardened runtime: JIT maps writable+executable memory. A notarized app wit
 (`re.jitEnabled == false`), which is slower but correct.
 
 Requirements: DUB, a D compiler (ldc2 tested), a C compiler (`cc`; MSVC on Windows). No CMake.
-Tests: `dub test --compiler=ldc2`.
+Tests: `dub test --compiler=ldc2` (`tests/basics.d`: a table of everyday expressions; `tests/semantics.d`: the pinned semantics and the API).
