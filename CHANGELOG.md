@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (unreleased)
+## 0.1.3 (2026-11-25)
 
 - `MatchData` that is not tied to a `Regex`: `MatchData.create(ok)` / `create(ovectorGroups, ok)` (`ok` last, as in the other `create`s), then
   `match(re, text)`, `matches(re, text)`, `matchLossy(re, text)`, `matchesLossy(re, text)`. One per thread is enough for any
