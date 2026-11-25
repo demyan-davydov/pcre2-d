@@ -64,7 +64,7 @@ for (auto m = md.matches("a=1 B=22"w); !m.empty; m.popFront())
 - UTF check and speed: with `Flags.noUtfCheck`, `match` skips the validity check of PCRE2 (and uses `pcre2_jit_match`
   for a JIT-compiled pattern). `matchLossy` / `matchesLossy` validate by design, but first look for any surrogate unit
   (a branch-free loop): a text with none is valid UTF-16 and is matched without the check, so the common case costs
-  the same as `noUtfCheck`; a text with a surrogate (paired or lone) is validated and, if needed, repaired. On short
+  close to `noUtfCheck` (one extra, simple pass over the text); a text with a surrogate (paired or lone) is validated and, if needed, repaired. On short
   log messages the PCRE2 check is about half of the cost of a simple match.
 - `badOffset`: `start` is past the end of the subject or inside a surrogate pair. An invalid `Regex` / `MatchData` gives
   `error` / 0 values instead of crashing.

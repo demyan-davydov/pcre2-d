@@ -5,6 +5,8 @@
 - `matchLossy` / `matchesLossy`: a text without any surrogate unit is matched without the UTF check (through
   `pcre2_jit_match` for a JIT-compiled pattern). Results are the same; short valid texts match much faster.
   The text is scanned for surrogates only from where PCRE2 can read it (`start` minus the longest look-behind).
+  So a lone surrogate lying before that part of the text is neither seen nor repaired: PCRE2 does not read it either,
+  and the result does not change.
 
 Known issues (open):
 

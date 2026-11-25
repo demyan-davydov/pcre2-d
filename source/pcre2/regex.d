@@ -21,7 +21,8 @@ enum Flags : uint
     multiline = 1 << 2, /// `^`/`$` match at line boundaries
     dollarEndOnly = 1 << 3, /// `$` matches only at the very end (unless multiline)
     utf = 1 << 4, /// treat pattern and subject as UTF-16 (surrogate pairs, Unicode case folding)
-    noUtfCheck = 1 << 5, /// caller guarantees valid UTF-16 subjects: skip the validity check (`match` then uses `pcre2_jit_match` with JIT); `matchLossy` still validates texts with surrogates
+    noUtfCheck = 1 << 5, /// caller guarantees valid UTF-16 subjects: skip the validity check
+    // (`match` then uses `pcre2_jit_match` with JIT; `matchLossy` still validates texts that have surrogates)
     noJit = 1 << 6, /// do not JIT compile even if the library supports it
     /// Unicode properties for `\d \w \s \b` and POSIX classes (PCRE2_UCP).
     ucp = 1 << 7,
@@ -192,7 +193,9 @@ struct Regex
         pl.noUtfCheck = (flags & Flags.noUtfCheck) != 0;
         pl.limits = limits;
         pcre2_pattern_info_16(code, PCRE2_INFO_CAPTURECOUNT, &pl.captureCount);
-        pcre2_pattern_info_16(code, PCRE2_INFO_MAXLOOKBEHIND, &pl.maxLookbehind);
+        // if it cannot be asked, assume the longest: the Lossy functions then scan the whole text
+        if (pcre2_pattern_info_16(code, PCRE2_INFO_MAXLOOKBEHIND, &pl.maxLookbehind) != 0)
+            pl.maxLookbehind = uint.max / 4;
         pcre2_pattern_info_16(code, PCRE2_INFO_NAMECOUNT, &pl.nameCount);
         pcre2_pattern_info_16(code, PCRE2_INFO_NAMEENTRYSIZE, &pl.nameEntrySize);
         pcre2_pattern_info_16(code, PCRE2_INFO_NAMETABLE, &pl.nameTable);
@@ -441,7 +444,7 @@ struct MatchData
         // A text without any surrogate unit is valid UTF-16, so the check of PCRE2 (about half of the cost of a
         // short match) is skipped; with a surrogate, paired or lone, the text is validated here even for a regex
         // compiled with `noUtfCheck`: that is the point of the function.
-        auto st = run(subject, start, hasSurrogate(unreadPrefixSkipped(subject, start)) ? 0 : PCRE2_NO_UTF_CHECK);
+        auto st = run(subject, start, hasSurrogate(readableTail(subject, start)) ? 0 : PCRE2_NO_UTF_CHECK);
         if (st != MatchStatus.badUtf)
             return st;
         const fixed = repaired(subject);
@@ -473,12 +476,12 @@ struct MatchData
         return fr;
     }
 
-    // The part of `subject` a match from `start` can read: PCRE2 looks back at most `maxLookbehind` characters
+    // The part of `subject` a match from `start` can read (`pl` is null for an invalid MatchData: only the margin): PCRE2 looks back at most `maxLookbehind` characters
     // (two code units each at most) from `start`, and what is before that is never read nor validated. Two more
     // units are scanned as a margin (a multiline `^` may look at the previous character, which the look-behind
     // count of PCRE2 is not documented to include). This holds also for `start >= subject.length`, where a match
     // at the end can still look back.
-    private const(wchar)[] unreadPrefixSkipped(const(wchar)[] subject, size_t start) const pure nothrow @nogc @trusted
+    private const(wchar)[] readableTail(const(wchar)[] subject, size_t start) const pure nothrow @nogc @trusted
     {
         const end = start < subject.length ? start : subject.length;
         const back = (pl ? cast(size_t) pl.maxLookbehind * 2 : 0) + 2;
@@ -489,7 +492,7 @@ struct MatchData
     private Matches matchesChecked(const(wchar)[] subject, size_t start) return nothrow @nogc @trusted
     {
         auto r = Matches(&this, subject, start);
-        if (hasSurrogate(unreadPrefixSkipped(subject, start)))
+        if (hasSurrogate(readableTail(subject, start)))
             r.forceCheck = true;
         else
             r.skipCheck = true; // no surrogate unit: valid UTF-16, no need to validate
@@ -543,8 +546,8 @@ struct MatchData
     }
 }
 
-// True if `text` has any surrogate unit (paired or lone). Without one it is valid UTF-16. Branch free, so that a
-// compiler vectorizes the loop.
+// True if `text` has any surrogate unit (paired or lone). Without one it is valid UTF-16. The loop has no branch,
+// which is meant to let a compiler vectorize it (not measured in this repository).
 private bool hasSurrogate(const(wchar)[] text) pure nothrow @nogc @safe
 {
     bool any = false;
